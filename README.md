@@ -1,17 +1,17 @@
 # 楓星小工具
 
-![version](https://img.shields.io/badge/version-v1.1.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-v1.2.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 一個輔助遊玩 **Maplestory World 楓星** 而設計的輕量桌面小工具，把打 Boss 常用的**技能冷卻計時**、**Boss 血量刻度表**與**練功經驗計算**整合在一個可透明、可置頂、可自由縮放的浮動視窗裡，方便疊在遊戲畫面上使用。
 
-以 Python + PySide6 開發。目前版本 **v1.1.0.0**。
+以 Python + PySide6 開發。目前版本 **v1.2.0.0**。
 
 ---
 
 ## 1. 下載與啟動
 
 此至此處下載 MapleStarTool.exe
-https://github.com/hozircon/MapleStarTool/releases/tag/V1.1.0.0
+https://github.com/hozircon/MapleStarTool/releases/tag/V1.2.0.0
 ![MapleStarTool.exe](docs/images/release_download.png)
 > 若你想從原始碼執行，請參考 [3. 開發相關](#3-開發相關)。
 
@@ -59,6 +59,39 @@ https://github.com/hozircon/MapleStarTool/releases/tag/V1.1.0.0
   - **↺ 重置**：把該計時歸零回 `READY`。
 - 底部 **全部重置**：一次清空所有技能計時。
 - 底部 **卡片 − / ＋**：等比縮放所有卡片（含字體與按鈕）。
+
+#### ⚔ 角色卡
+
+![角色卡與按鍵配置](docs/images/player-cards.png)
+
+Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」倒數卡，常駐在 Boss 卡片上方（切換 Boss 也不會消失），**標題為藍色**以與金色的 BOSS 技能卡區別。目前內建：
+
+- **劍士「魔法消除」**：技能本身 CD 為 60 秒，但 BOSS 會抵抗 80 秒，因此卡片倒數 **80 秒**，READY 時才能再次對 BOSS 上魔法消除。
+- **藥水CD**：部分 BOSS 戰喝藥後需等待才能再喝，預設 **30 秒**（可在卡片秒數欄客製）。
+
+顯示/隱藏狀態會自動記住。清單在 `maple_star_tool.py` 上方的 `PLAYER_SKILLS` 設定。
+
+#### 按鍵配置（免滑鼠觸發倒數）
+
+看到 BOSS 施放技能還要把滑鼠移過去點卡片會有延遲——每張卡片下方（秒數/🔁/↺ 那排的下面）都有一顆 **「按鍵配置」** 鈕：
+
+![按鍵配置三步驟](docs/images/key-config.png)
+
+1. **點一下「按鍵配置」**，鈕會顯示「按任意鍵…」。
+2. **直接按下想綁定的實體按鍵**（F1~F12、Delete、字母、數字、方向鍵……幾乎任何鍵都可以），鈕就會顯示該按鍵名稱，設定完成。按 **Esc** 取消設定；**右鍵點擊** 該鈕可清除綁定。
+3. 之後只要按下綁定鍵——**即使遊戲視窗在最上層**——卡片就會觸發（計次卡則 +1）。
+
+旁邊的 **⚡ 小開關** 決定觸發模式：
+
+- **⚡ 關（預設）**：卡片 READY 時按鍵才會開始倒數；倒數中按鍵沒有反應。
+- **⚡ 開**：倒數中按鍵也會**直接重新倒數**（適合看到 BOSS 再次施放就要立即校正的情境）。
+
+補充說明：
+
+- 按鍵偵測採「監聽」方式，**不會攔截按鍵**，遊戲仍會正常收到該按鍵；因此可以直接綁你施放技能或喝水的快捷鍵。
+- 同一個按鍵同時只能綁一張卡；重複綁定會自動解除舊的。
+- 為避免按住連發誤觸，同一張卡 1 秒內（計次卡 0.5 秒內）的重複按鍵會被忽略。
+- 所有綁定與 ⚡ 狀態儲存在程式同目錄的 `maple_star_config.json`，**重啟後自動載回**；預設全部未綁定。
 
 #### 計次卡（例：凡雷恩）
 

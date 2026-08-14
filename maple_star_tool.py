@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.1.0.0
+楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.2.0.0
 
 主視窗工具：
   A. 技能冷卻計時器
      • 小卡片 + 流式排版（拉寬→一排；拉窄→自動折多排）
      • 卡片縮放鈕、兩段透明度(背景/方塊)、分類頁籤、↺重置、🔁巡迴、全部重置
      • 秒數客製：留空用預設，填數字用你填的秒數
+     • ⚔ 角色卡：角色技能/狀態倒數（劍士魔法消除 80 秒、藥水CD 30 秒），
+       常駐顯示在 Boss 卡片上方，藍色標題與 BOSS 技能區別
+     • 按鍵配置：每張卡下方的「按鍵配置」鈕——點一下、按下想綁的實體按鍵即完成
+       （Esc 取消、右鍵清除）。之後按綁定鍵就觸發倒數（全域偵測、不攔截按鍵）。
+       ⚡ 開關：開＝倒數中按鍵也直接重新倒數；關（預設）＝READY 時按鍵才會開始。
+       綁定存到 maple_star_config.json，重啟後保留，預設全部未綁定
   C. 練等效率計算器（頁籤右側「📊 練等」）
      • 起始/結束經驗 + 倒數計時器 → 經驗差(含逗號)、每分鐘/每小時 效率
      • 選填「升級經驗」→ 升級總時 / 升級剩餘（精確到分鐘）
@@ -26,7 +32,9 @@
 import sys
 import os
 import time
-from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal
+import json
+import threading
+from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal, QObject
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QSlider, QSizeGrip,
@@ -48,8 +56,8 @@ CATEGORIES = [
         {"name": "召喚豬魔", "type": "counter", "count": 7},
     ]},
     {"name": "普通/混沌龍王", "skills": [
-        {"name": "魔法無效化", "cd": 30},
-        {"name": "物理無效化", "cd": 30},
+        {"name": "魔法無效化", "cd": 40},
+        {"name": "物理無效化", "cd": 40},
     ]},
     {"name": "阿卡伊農", "skills": [
         {"name": "尾段全圖殺", "cd": 70},
@@ -66,7 +74,15 @@ CATEGORIES = [
     ]},
 ]
 
-CARD_W, CARD_H = 120, 132
+#   角色技能／狀態（「打Boss」模式中常駐顯示，可用 ⚔ 按鈕收合；標題為藍色以與 BOSS 技能區別）
+#   劍士「魔法消除」：技能本身 CD 60 秒，但 BOSS 會抵抗 80 秒 → 實際要倒數 80 秒
+#   「藥水CD」：部分 BOSS 戰喝藥後需等待才能再喝（預設 30 秒，可在卡片上客製）
+PLAYER_SKILLS = [
+    {"name": "魔法消除", "cd": 80},
+    {"name": "藥水CD", "cd": 30},
+]
+
+CARD_W, CARD_H = 120, 158
 CTRL_H = 22
 ROOT_RGB = (18, 20, 27)
 CARD_RGB = (34, 38, 49)
@@ -99,10 +115,17 @@ def fmt_minutes(m):
     return f"{m // 60} 時 {m % 60} 分"
 
 
+def app_dir():
+    """程式所在目錄：打包成 exe 時用 exe 的位置（__file__ 會指向臨時解壓目錄，不可用）"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def _load_exp_table():
     """讀取 CSV 第3欄（楓星調整版）的升級經驗，僅取整數，1-30無數據則略過。"""
     d = {}
-    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "經驗需求表(推測).csv")
+    csv_path = os.path.join(app_dir(), "經驗需求表(推測).csv")
     try:
         with open(csv_path, encoding="utf-8") as f:
             for line in f:
@@ -123,6 +146,117 @@ def _load_exp_table():
 
 
 EXP_TABLE = _load_exp_table()
+
+
+# =========================================================================
+#  設定檔（按鍵綁定等，存在程式同目錄，重啟後保留）
+# =========================================================================
+CONFIG_PATH = os.path.join(app_dir(), "maple_star_config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (FileNotFoundError, ValueError, OSError):
+        return {}
+
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+# =========================================================================
+#  全域按鍵偵測（Windows 低階鍵盤鉤子）
+#  只「監聽」按鍵、不攔截，遊戲仍會正常收到該按鍵。
+# =========================================================================
+IS_WINDOWS = sys.platform == "win32"
+
+# Windows 虛擬鍵碼 → 顯示名稱（未列出的鍵顯示為 VK##，一樣可以綁定）
+VK_ESC = 0x1B   # Esc 保留：設定按鍵時按 Esc = 取消，不可綁定
+VK_NAMES = {}
+VK_NAMES.update({0x70 + i: f"F{i + 1}" for i in range(24)})             # F1–F24
+VK_NAMES.update({c: chr(c) for c in range(0x41, 0x5B)})                 # A–Z
+VK_NAMES.update({c: chr(c) for c in range(0x30, 0x3A)})                 # 0–9
+VK_NAMES.update({0x60 + i: f"Num{i}" for i in range(10)})               # 數字鍵盤 0–9
+VK_NAMES.update({
+    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x13: "Pause", 0x14: "CapsLock",
+    0x20: "Space", 0x21: "PgUp", 0x22: "PgDn", 0x23: "End", 0x24: "Home",
+    0x25: "←", 0x26: "↑", 0x27: "→", 0x28: "↓",
+    0x2D: "Insert", 0x2E: "Delete",
+    0x5B: "LWin", 0x5C: "RWin",
+    0x6A: "Num*", 0x6B: "Num+", 0x6D: "Num-", 0x6E: "Num.", 0x6F: "Num/",
+    0x90: "NumLock", 0x91: "ScrLock",
+    0xA0: "LShift", 0xA1: "RShift", 0xA2: "LCtrl", 0xA3: "RCtrl", 0xA4: "LAlt", 0xA5: "RAlt",
+    0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
+    0xC0: "`", 0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
+})
+NAME_TO_VK = {name: vk for vk, name in VK_NAMES.items()}
+
+
+def vk_name(vk):
+    return VK_NAMES.get(vk, f"VK{vk}")
+
+
+class GlobalKeyListener(QObject):
+    """在背景執行緒掛 WH_KEYBOARD_LL 鉤子，偵測到按鍵按下時發出 key_pressed(vk)。"""
+    key_pressed = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._thread = None
+        self._proc = None   # 保留 callback 參考，避免被 GC
+
+    def start(self):
+        if not IS_WINDOWS or self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True, name="GlobalKeyListener")
+        self._thread.start()
+
+    def _run(self):
+        import ctypes
+        from ctypes import wintypes
+
+        WH_KEYBOARD_LL = 13
+        WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
+
+        class KBDLLHOOKSTRUCT(ctypes.Structure):
+            _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                        ("dwExtraInfo", ctypes.c_void_p)]
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_int,
+                                      wintypes.WPARAM, wintypes.LPARAM)
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HMODULE, wintypes.DWORD]
+        user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+        user32.CallNextHookEx.restype = ctypes.c_ssize_t
+        # 64 位元下 HMODULE 會被 ctypes 預設的 c_int 截斷 → 錯誤 126，必須明確宣告
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+        def hook_proc(n_code, w_param, l_param):
+            if n_code >= 0 and w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                kb = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                self.key_pressed.emit(int(kb.vkCode))
+            return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+        self._proc = HOOKPROC(hook_proc)
+        hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc,
+                                        kernel32.GetModuleHandleW(None), 0)
+        if not hook:
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
 
 
 # =========================================================================
@@ -230,6 +364,7 @@ class RingCard(QFrame):
         self.remaining = 0.0; self.active = False; self.loop = False
         self._deadline = 0.0
         self._hover = False; self.block_alpha = 240; self.zoom = 1.0
+        self.hotkey_id = None; self.hotkey_vk = None; self._last_hotkey = 0.0
 
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(4)
         self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
@@ -248,6 +383,18 @@ class RingCard(QFrame):
         self.reset_btn.clicked.connect(self.reset)
         row.addWidget(self.sec_input, 1); row.addWidget(self.loop_btn, 0); row.addWidget(self.reset_btn, 0)
         lay.addLayout(row)
+        row2 = QHBoxLayout(); row2.setSpacing(4)
+        self.key_btn = QPushButton("按鍵配置"); self.key_btn.setObjectName("keyBtn")
+        self.key_btn.setCursor(Qt.PointingHandCursor); self.key_btn.setFocusPolicy(Qt.NoFocus)
+        self.key_btn.setToolTip("點一下後按下要綁定的按鍵（Esc 取消、右鍵清除綁定）。\n"
+                                "之後按綁定鍵即觸發倒數（全域偵測，遊戲視窗在最上層也有效）。")
+        self.force_btn = QPushButton("⚡"); self.force_btn.setObjectName("forceBtn")
+        self.force_btn.setCheckable(True); self.force_btn.setCursor(Qt.PointingHandCursor)
+        self.force_btn.setFocusPolicy(Qt.NoFocus)
+        self.force_btn.setToolTip("⚡開：倒數中按綁定鍵也會直接重新倒數\n"
+                                  "⚡關（預設）：READY 時按綁定鍵才會開始倒數")
+        row2.addWidget(self.key_btn, 1); row2.addWidget(self.force_btn, 0)
+        lay.addLayout(row2)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("單擊：開始　·　快速雙擊：重新開始")
         self.apply_zoom(1.0)
@@ -258,16 +405,24 @@ class RingCard(QFrame):
         ch = max(18, int(CTRL_H * z))
         self.sec_input.setFixedHeight(ch)
         self.loop_btn.setFixedSize(ch, ch); self.reset_btn.setFixedSize(ch, ch)
+        self.key_btn.setFixedHeight(ch); self.force_btn.setFixedSize(ch, ch)
         fn = QFont("Microsoft JhengHei"); fn.setPixelSize(max(11, int(14 * z))); fn.setBold(True)
         self.name_lbl.setFont(fn)
         fi = QFont("Microsoft JhengHei"); fi.setPixelSize(max(9, int(12 * z)))
         self.sec_input.setFont(fi)
+        fk = QFont("Microsoft JhengHei"); fk.setPixelSize(max(9, int(11 * z)))
+        self.key_btn.setFont(fk)
         fb = QFont(); fb.setPixelSize(max(9, int(12 * z)))
-        self.loop_btn.setFont(fb); self.reset_btn.setFont(fb)
+        self.loop_btn.setFont(fb); self.reset_btn.setFont(fb); self.force_btn.setFont(fb)
         self.updateGeometry(); self.update()
 
     def set_block_alpha(self, a):
         self.block_alpha = a; self.update()
+
+    def set_hotkey_display(self, vk):
+        """更新綁定鍵並讓按鍵配置鈕顯示按鍵名稱（None＝未綁定）"""
+        self.hotkey_vk = vk
+        self.key_btn.setText(vk_name(vk) if vk else "按鍵配置")
 
     def _resolve_secs(self):
         t = self.sec_input.text().strip()
@@ -298,6 +453,18 @@ class RingCard(QFrame):
     def reset(self):
         self.active = False; self.remaining = 0.0; self._deadline = 0.0; self.update()
 
+    def hotkey_activate(self):
+        """全域按鍵觸發。⚡開：隨時重新倒數；⚡關（預設）：READY 時才開始倒數。
+        1 秒內重複按鍵忽略（防按住連發）"""
+        now = time.perf_counter()
+        if now - self._last_hotkey < 1.0:
+            return
+        self._last_hotkey = now
+        if self.force_btn.isChecked():
+            self.restart()
+        else:
+            self.trigger()
+
     def tick(self, dt):
         if not self.active:
             return
@@ -320,13 +487,15 @@ class RingCard(QFrame):
     def leaveEvent(self, e): self._hover = False; self.update()
 
     def mousePressEvent(self, e):
-        if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn):
+        if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
+                                                    self.key_btn, self.force_btn):
             return
         if e.button() == Qt.LeftButton:
             self.trigger()
 
     def mouseDoubleClickEvent(self, e):
-        if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn):
+        if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
+                                                    self.key_btn, self.force_btn):
             return
         if e.button() == Qt.LeftButton:
             self.restart()
@@ -379,6 +548,7 @@ class CounterCard(QFrame):
         self.default_max = int(count)
         self.count = 0
         self._hover = False; self.block_alpha = 240; self.zoom = 1.0
+        self.hotkey_id = None; self.hotkey_vk = None; self._last_hotkey = 0.0
 
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(4)
         self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
@@ -394,6 +564,13 @@ class CounterCard(QFrame):
         self.reset_btn.clicked.connect(self.reset)
         row.addWidget(self.max_input, 1); row.addWidget(self.reset_btn, 0)
         lay.addLayout(row)
+        row2 = QHBoxLayout(); row2.setSpacing(4)
+        self.key_btn = QPushButton("按鍵配置"); self.key_btn.setObjectName("keyBtn")
+        self.key_btn.setCursor(Qt.PointingHandCursor); self.key_btn.setFocusPolicy(Qt.NoFocus)
+        self.key_btn.setToolTip("點一下後按下要綁定的按鍵（Esc 取消、右鍵清除綁定）。\n"
+                                "之後按綁定鍵即次數 +1（全域偵測，遊戲視窗在最上層也有效）。")
+        row2.addWidget(self.key_btn, 1)
+        lay.addLayout(row2)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("單擊：次數 +1")
         self.apply_zoom(1.0)
@@ -403,15 +580,23 @@ class CounterCard(QFrame):
         self.setFixedSize(int(CARD_W * z), int(CARD_H * z))
         ch = max(18, int(CTRL_H * z))
         self.max_input.setFixedHeight(ch); self.reset_btn.setFixedSize(ch, ch)
+        self.key_btn.setFixedHeight(ch)
         fn = QFont("Microsoft JhengHei"); fn.setPixelSize(max(11, int(14 * z))); fn.setBold(True)
         self.name_lbl.setFont(fn)
         fi = QFont("Microsoft JhengHei"); fi.setPixelSize(max(9, int(12 * z)))
         self.max_input.setFont(fi)
+        fk = QFont("Microsoft JhengHei"); fk.setPixelSize(max(9, int(11 * z)))
+        self.key_btn.setFont(fk)
         fb = QFont(); fb.setPixelSize(max(9, int(12 * z))); self.reset_btn.setFont(fb)
         self.updateGeometry(); self.update()
 
     def set_block_alpha(self, a):
         self.block_alpha = a; self.update()
+
+    def set_hotkey_display(self, vk):
+        """更新綁定鍵並讓按鍵配置鈕顯示按鍵名稱（None＝未綁定）"""
+        self.hotkey_vk = vk
+        self.key_btn.setText(vk_name(vk) if vk else "按鍵配置")
 
     def _resolve_max(self):
         t = self.max_input.text().strip()
@@ -431,6 +616,14 @@ class CounterCard(QFrame):
     def reset(self):
         self.count = 0; self.update()
 
+    def hotkey_activate(self):
+        """全域按鍵觸發：次數 +1；0.5 秒內重複按鍵忽略（防按住連發）"""
+        now = time.perf_counter()
+        if now - self._last_hotkey < 0.5:
+            return
+        self._last_hotkey = now
+        self.increment()
+
     def tick(self, dt):
         pass  # 計數卡不倒數
 
@@ -438,14 +631,14 @@ class CounterCard(QFrame):
     def leaveEvent(self, e): self._hover = False; self.update()
 
     def mousePressEvent(self, e):
-        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn):
+        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn):
             return
         if e.button() == Qt.LeftButton:
             self.increment()
 
     def mouseDoubleClickEvent(self, e):
         # 快速連點時第二下由 doubleClick 送達，這裡補計一次，確保每次點擊都算到
-        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn):
+        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn):
             return
         if e.button() == Qt.LeftButton:
             self.increment()
@@ -771,6 +964,26 @@ class TimerWindow(QWidget):
         self.ruler_base_val = 60
         self.ruler_hi_color = QColor(230, 60, 60)
 
+        # 設定檔與按鍵綁定：{卡片id: {"vk": 虛擬鍵碼, "force": ⚡開關}}
+        self.cfg = load_config()
+        self.hotkeys = {}
+        for k, v in (self.cfg.get("hotkeys") or {}).items():
+            if not isinstance(k, str):
+                continue
+            k = k.replace("玩家::", "角色::", 1)                      # 舊版 id 遷移
+            if isinstance(v, dict) and isinstance(v.get("vk"), int):
+                self.hotkeys[k] = {"vk": v["vk"], "force": bool(v.get("force", False))}
+            elif isinstance(v, str) and v in NAME_TO_VK:              # 舊版格式（按鍵名稱字串）
+                self.hotkeys[k] = {"vk": NAME_TO_VK[v], "force": False}
+        self.card_by_id = {}          # hotkey_id → 卡片
+        self.cat_cards = []           # 每個 Boss 分類各自的卡片清單
+        self.player_cards = []        # 角色技能卡
+        self._vk_map = {}             # 虛擬鍵碼 → 卡片清單
+        self._capture_card = None     # 正在等待使用者按鍵的卡片
+        self._loading_cfg = False
+        self.key_listener = GlobalKeyListener(self)
+        self.key_listener.key_pressed.connect(self._on_global_key)
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowTitle("楓星小工具")
@@ -793,15 +1006,32 @@ class TimerWindow(QWidget):
         exp_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.calc_page = CalcPage(); exp_scroll.setWidget(self.calc_page)
         self.main_stack.addWidget(exp_scroll)                  # 0 = 練功（可捲動，字不會被吃）
+        boss_page = QWidget()
+        bv = QVBoxLayout(boss_page); bv.setContentsMargins(0, 0, 0, 0); bv.setSpacing(4)
+        bv.addWidget(self._player_row())
         self.boss_stack = QStackedWidget()
         for cat in CATEGORIES:
             self.boss_stack.addWidget(self._category_page(cat))
-        self.main_stack.addWidget(self.boss_stack)             # 1 = 打Boss
+        bv.addWidget(self.boss_stack, 1)
+        self.main_stack.addWidget(boss_page)                   # 1 = 打Boss
         self.boss_combo.currentIndexChanged.connect(self.boss_stack.setCurrentIndex)
 
         outer.addWidget(self._bottombar())
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick); self.timer.start(TICK_MS)
         self._apply_styles(); self._push_block_alpha()
+
+        # 套用已儲存的按鍵綁定並啟動全域監聽
+        self._loading_cfg = True
+        for cid, ent in self.hotkeys.items():
+            card = self.card_by_id.get(cid)
+            if card:
+                card.set_hotkey_display(ent["vk"])
+                if getattr(card, "force_btn", None) is not None:
+                    card.force_btn.setChecked(ent.get("force", False))
+        self._loading_cfg = False
+        self._rebuild_vk_map()
+        self.key_listener.start()
+
         self.set_mode("exp")   # 預設：練功經驗計算
         # 縮放握把固定在視窗右下角（永遠在最右）
         self.size_grip = QSizeGrip(self.frame); self.size_grip.setFixedSize(16, 16)
@@ -842,6 +1072,12 @@ class TimerWindow(QWidget):
         for cat in CATEGORIES:
             self.boss_combo.addItem(cat["name"])
         h.addWidget(self.boss_combo, 1)
+        self.player_btn = QPushButton("⚔ 角色"); self.player_btn.setObjectName("toolTab")
+        self.player_btn.setCheckable(True); self.player_btn.setCursor(Qt.PointingHandCursor)
+        self.player_btn.setToolTip("顯示/隱藏角色技能/狀態卡（例：劍士魔法消除、藥水CD）")
+        self.player_btn.setChecked(bool(self.cfg.get("show_player_skills", True)))
+        self.player_btn.toggled.connect(self._toggle_player)
+        h.addWidget(self.player_btn, 0)
         self.ruler_btn = QPushButton("📏 血量刻度"); self.ruler_btn.setObjectName("toolTab")
         self.ruler_btn.setCheckable(True); self.ruler_btn.setCursor(Qt.PointingHandCursor)
         self.ruler_btn.setToolTip("彈出 Boss 血量刻度浮窗（可拖到血條上）")
@@ -892,16 +1128,40 @@ class TimerWindow(QWidget):
         c = self.ruler_hi_color
         self.rswatch.setStyleSheet(f"background:{c.name()}; border-radius:4px; border:1px solid rgba(255,255,255,70);")
 
+    def _player_row(self):
+        """角色技能/狀態卡（打Boss模式常駐顯示在 Boss 卡片上方，可用 ⚔ 按鈕收合）"""
+        wrap = QWidget()
+        flow = FlowLayout(wrap, margin=0, hspacing=12, vspacing=12, center=True)
+        sp = wrap.sizePolicy(); sp.setHeightForWidth(True); sp.setVerticalPolicy(QSizePolicy.Minimum)
+        wrap.setSizePolicy(sp)
+        for sk in PLAYER_SKILLS:
+            card = RingCard(sk["name"], sk["cd"])
+            card.name_lbl.setObjectName("playerSkillName")   # 藍色標題，與 BOSS 技能區別
+            card.hotkey_id = f"角色::{sk['name']}"
+            self.card_by_id[card.hotkey_id] = card
+            self._wire_card(card)
+            self.cards.append(card); self.player_cards.append(card)
+            flow.addWidget(card)
+        self.flows.append(flow)
+        self.player_wrap = wrap
+        wrap.setVisible(self.player_btn.isChecked())
+        return wrap
+
     def _category_page(self, cat):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setObjectName("scroll")
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         page = QWidget(); flow = FlowLayout(page, 2, 12, 12, center=True)
+        cat_list = []
         for sk in cat["skills"]:
             if sk.get("type") == "counter":
                 card = CounterCard(sk["name"], sk.get("count", 1))
             else:
                 card = RingCard(sk["name"], sk["cd"])
-            self.cards.append(card); flow.addWidget(card)
+            card.hotkey_id = f"{cat['name']}::{sk['name']}"
+            self.card_by_id[card.hotkey_id] = card
+            self._wire_card(card)
+            self.cards.append(card); cat_list.append(card); flow.addWidget(card)
+        self.cat_cards.append(cat_list)
         self.flows.append(flow); scroll.setWidget(page)
         return scroll
 
@@ -958,27 +1218,109 @@ class TimerWindow(QWidget):
         self.exp_btn.setChecked(not is_boss); self.boss_btn.setChecked(is_boss)
         for w in self._boss_only_bottom:
             w.setVisible(is_boss)
-        self._sync_ruler_ui()
+        self._sync_panels()
 
-    def _sync_ruler_ui(self):
-        show = getattr(self, "mode", "exp") == "boss" and self.ruler_btn.isChecked()
-        self._set_ruler_settings_visible(show)
+    def _sync_panels(self):
+        is_boss = getattr(self, "mode", "exp") == "boss"
+        self._set_panel_visible(self.ruler_set, is_boss and self.ruler_btn.isChecked())
 
-    def _set_ruler_settings_visible(self, show):
+    def _set_panel_visible(self, panel, show):
         # 顯示/隱藏設定列時，讓視窗高度隨之增減，避免壓縮到卡片區
-        if show == self.ruler_set.isVisible():
+        if show == panel.isVisible():
             return
-        delta = self._ruler_set_height()
+        delta = self._panel_height(panel)
         if show:
-            self.ruler_set.setVisible(True)
+            panel.setVisible(True)
             self.resize(self.width(), self.height() + delta)
         else:
-            self.ruler_set.setVisible(False)
+            panel.setVisible(False)
             self.resize(self.width(), max(self.minimumHeight(), self.height() - delta))
 
-    def _ruler_set_height(self):
+    def _panel_height(self, panel):
         cw = max(60, self.width() - 28)      # 扣掉外層左右邊界
-        return self.ruler_set.layout().heightForWidth(cw) + 8   # +外層 spacing
+        return panel.layout().heightForWidth(cw) + 8   # +外層 spacing
+
+    # ---------- 按鍵偵測 ----------
+    def _wire_card(self, card):
+        """接上卡片的「按鍵配置」鈕（左鍵＝設定、右鍵＝清除）與 ⚡ 開關"""
+        card.key_btn.clicked.connect(lambda _=False, c=card: self._begin_capture(c))
+        card.key_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        card.key_btn.customContextMenuRequested.connect(lambda _pos, c=card: self._clear_hotkey(c))
+        if getattr(card, "force_btn", None) is not None:
+            card.force_btn.toggled.connect(lambda on, c=card: self._on_force_toggled(c, on))
+
+    def _begin_capture(self, card):
+        if self._capture_card is card:      # 再點一次＝取消設定
+            self._end_capture(); return
+        self._end_capture()
+        self._capture_card = card
+        card.key_btn.setText("按任意鍵…")
+        self.key_listener.start()
+
+    def _end_capture(self):
+        card, self._capture_card = self._capture_card, None
+        if card is not None:
+            card.set_hotkey_display(card.hotkey_vk)   # 還原顯示
+
+    def _assign_hotkey(self, card, vk):
+        # 一個按鍵只綁一張卡：解除其他卡上的相同按鍵
+        for other_id in [k for k, e in self.hotkeys.items() if e["vk"] == vk and k != card.hotkey_id]:
+            self.hotkeys.pop(other_id)
+            other = self.card_by_id.get(other_id)
+            if other:
+                other.set_hotkey_display(None)
+        force = getattr(card, "force_btn", None) is not None and card.force_btn.isChecked()
+        self.hotkeys[card.hotkey_id] = {"vk": vk, "force": force}
+        card.set_hotkey_display(vk)
+        self._rebuild_vk_map(); self._save_config()
+
+    def _clear_hotkey(self, card):
+        if self._capture_card is card:
+            self._end_capture()
+        if card.hotkey_id in self.hotkeys:
+            self.hotkeys.pop(card.hotkey_id)
+            self._rebuild_vk_map(); self._save_config()
+        card.set_hotkey_display(None)
+
+    def _on_force_toggled(self, card, on):
+        if self._loading_cfg:
+            return
+        ent = self.hotkeys.get(card.hotkey_id)
+        if ent is not None:
+            ent["force"] = bool(on)
+            self._save_config()
+
+    def _rebuild_vk_map(self):
+        self._vk_map = {}
+        for cid, ent in self.hotkeys.items():
+            card = self.card_by_id.get(cid)
+            if card:
+                self._vk_map.setdefault(ent["vk"], []).append(card)
+
+    def _on_global_key(self, vk):
+        if self._capture_card is not None:   # 設定模式：這次按鍵拿來綁定
+            card = self._capture_card
+            self._end_capture()
+            if vk != VK_ESC:                 # Esc＝取消設定
+                self._assign_hotkey(card, vk)
+            return
+        cards = self._vk_map.get(vk)
+        if not cards:
+            return
+        fw = QApplication.focusWidget()
+        if isinstance(fw, (QLineEdit, QComboBox)):
+            return   # 正在本程式的輸入框/下拉選單打字時不觸發
+        for card in cards:
+            card.hotkey_activate()
+
+    def _toggle_player(self, on):
+        self.player_wrap.setVisible(on)
+        self.cfg["show_player_skills"] = bool(on)
+        self._save_config()
+
+    def _save_config(self):
+        self.cfg["hotkeys"] = self.hotkeys
+        save_config(self.cfg)
 
     def _place_grip(self):
         if hasattr(self, "size_grip"):
@@ -1001,14 +1343,14 @@ class TimerWindow(QWidget):
             else:
                 self.ruler_window.ruler.set_base_alpha(self._ralpha())
                 self.ruler_window.ruler.hi_color = QColor(self.ruler_hi_color)
-            self._sync_ruler_ui()   # 先讓設定列出現、主視窗長高
+            self._sync_panels()   # 先讓設定列出現、主視窗長高
             # 再放到「長高後」主視窗的下方，避免遮到透明度那一排
             self.ruler_window.move(self.x(), self.y() + self.height() + 16)
             self.ruler_window.show(); self.ruler_window.raise_()
         else:
             if self.ruler_window is not None:
                 self.ruler_window.hide()
-            self._sync_ruler_ui()
+            self._sync_panels()
 
     def _on_rbase(self, v):
         self.ruler_base_val = v
@@ -1088,6 +1430,14 @@ class TimerWindow(QWidget):
         #bossBar {{ background: transparent; }}
         #rulerSet {{ background: rgba(91,155,255,28); border:1px solid rgba(91,155,255,90); border-radius:10px; }}
         QLabel#skillName {{ color:rgb(241,201,74); background:transparent; }}
+        QLabel#playerSkillName {{ color:#5b9bff; background:transparent; }}
+
+        #keyBtn {{ background:rgba(91,155,255,36); color:#9dc1ff; border:1px solid rgba(91,155,255,90);
+                border-radius:6px; padding:0 4px; }}
+        #keyBtn:hover {{ background:rgba(91,155,255,70); color:#dfe9ff; }}
+        #forceBtn {{ background:{ctrl}; color:#dfe3ea; border:none; border-radius:6px; padding:0; }}
+        #forceBtn:hover {{ background:{ctrl_h}; }}
+        #forceBtn:checked {{ background:#ffc454; color:#1a1206; }}
 
         #modeTab {{ background:{ctrl}; color:#b9bfcc; border:none; border-radius:11px;
                 padding:5px 13px; font-size:13px; font-weight:bold; font-family:"Microsoft JhengHei"; }}

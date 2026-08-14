@@ -10,3 +10,6 @@ venv/
 build/
 dist/
 *.spec
+
+# 使用者個人設定（按鍵綁定等）
+maple_star_config.json
