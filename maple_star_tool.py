@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.2.0.0
+楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.3.0.0
 
 主視窗工具：
   A. 技能冷卻計時器
@@ -34,7 +34,7 @@ import os
 import time
 import json
 import threading
-from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal, QObject
+from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal, QObject, QEvent
 from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QSlider, QSizeGrip,
@@ -122,12 +122,15 @@ def app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def _load_exp_table():
-    """讀取 CSV 第3欄（楓星調整版）的升級經驗，僅取整數，1-30無數據則略過。"""
+def bundled_dir():
+    """打包進 exe 的資料檔位置（PyInstaller 執行時的臨時解壓目錄）；未打包時同 app_dir()"""
+    return getattr(sys, "_MEIPASS", None) or app_dir()
+
+
+def _parse_exp_csv(path):
     d = {}
-    csv_path = os.path.join(app_dir(), "經驗需求表(推測).csv")
     try:
-        with open(csv_path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split(",")
                 if len(parts) < 3:
@@ -140,8 +143,21 @@ def _load_exp_table():
                     d[lv] = int(float(val))
                 except (ValueError, IndexError):
                     continue
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         pass
+    return d
+
+
+def _load_exp_table():
+    """讀取 CSV 第3欄（楓星調整版）的升級經驗，僅取整數，1-30無數據則略過。
+
+    先找程式旁邊的 CSV（使用者可自行替換成別版數據），沒有才用打包進 exe 的那份，
+    這樣單獨下載 exe 也能用「輸入等級自動帶入升級經驗」。
+    """
+    name = "經驗需求表(推測).csv"
+    d = _parse_exp_csv(os.path.join(app_dir(), name))
+    if not d:
+        d = _parse_exp_csv(os.path.join(bundled_dir(), name))
     return d
 
 
@@ -260,6 +276,70 @@ class GlobalKeyListener(QObject):
 
 
 # =========================================================================
+#  跨螢幕（不同縮放比例）搬移時鎖住視窗尺寸
+# =========================================================================
+class DpiSizeKeeper(QObject):
+    """跨螢幕搬移時鎖住「邏輯尺寸」。
+
+    Windows 在視窗換到不同縮放比例的螢幕時（例：150% → 100%）會發 WM_DPICHANGED，
+    並建議一個「實體像素大小不變」的矩形；Qt 照做之後，視窗的邏輯尺寸就被乘上
+    舊/新 DPI 比例 —— 730x480 一到 100% 螢幕就變成 1095x720，看起來像整個爆開，
+    卡片卻還是原本大小，於是留下一大片空白。這裡在 DPI 變更後把邏輯尺寸改回去。
+    """
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+        self.handle = win.windowHandle()
+        self.dpr = self.handle.devicePixelRatio()
+        self.size = win.size()
+        self._settling = False    # 正在換 DPI（此期間的尺寸變化都是系統改的）
+        self._busy = False        # 自己正在改尺寸
+        # 拖過螢幕交界時 screenChanged 會連發好幾次，而且系統是「之後」才把視窗放大，
+        # 所以用一個可重設的計時器，等拖曳／DPI 切換都安定下來再把尺寸改回去。
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(250)
+        self._timer.timeout.connect(self._restore)
+        self.handle.screenChanged.connect(self._on_screen_changed)
+        win.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):
+        if (obj is self.win and ev.type() == QEvent.Resize
+                and not self._busy and not self._settling):
+            self.size = QSize(ev.size())                # 只記使用者自己調的尺寸
+        return False
+
+    def _on_screen_changed(self, screen):
+        dpr = screen.devicePixelRatio()
+        if abs(dpr - self.dpr) < 1e-3:
+            return                      # 同縮放比例的螢幕，尺寸不會被動到
+        self.dpr = dpr
+        self._settling = True
+        self._timer.start()
+
+    def _restore(self):
+        self._settling = False
+        if self.win.size() == self.size:
+            return
+        self._busy = True
+        try:
+            self.win.resize(self.size)
+        finally:
+            self._busy = False
+
+
+def keep_logical_size(win):
+    """視窗 show() 之後呼叫；回傳 DpiSizeKeeper（或 None，表示原生視窗還沒建立）"""
+    if getattr(win, "_dpi_keeper", None) is not None:
+        return win._dpi_keeper
+    if win.windowHandle() is None:
+        return None
+    win._dpi_keeper = DpiSizeKeeper(win)
+    return win._dpi_keeper
+
+
+# =========================================================================
 #  永遠不透明的拖曳握把（解決透明背景無處可抓）
 # =========================================================================
 class DragHandle(QWidget):
@@ -298,10 +378,13 @@ class DragHandle(QWidget):
 #  流式排版
 # =========================================================================
 class FlowLayout(QLayout):
-    def __init__(self, parent=None, margin=2, hspacing=12, vspacing=12, center=False):
+    def __init__(self, parent=None, margin=2, hspacing=12, vspacing=12, center=False, hfw=True):
         super().__init__(parent)
         self._h, self._v = hspacing, vspacing
         self._center = center
+        # hfw=False：對外宣告不支援 heightForWidth（高度由外部自行設定），
+        # 避免此列的折行高度被父層當成「最小高度」往上傳。
+        self._hfw = hfw
         self._items = []
         self.setContentsMargins(margin, margin, margin, margin)
 
@@ -310,7 +393,7 @@ class FlowLayout(QLayout):
     def itemAt(self, i):           return self._items[i] if 0 <= i < len(self._items) else None
     def takeAt(self, i):           return self._items.pop(i) if 0 <= i < len(self._items) else None
     def expandingDirections(self): return Qt.Orientation(0)
-    def hasHeightForWidth(self):   return True
+    def hasHeightForWidth(self):   return self._hfw
     def heightForWidth(self, w):   return self._layout(QRect(0, 0, w, 0), True)
 
     def setGeometry(self, rect):
@@ -991,7 +1074,8 @@ class TimerWindow(QWidget):
         default_w = min(70 + max_cards * (CARD_W + 12), 900)
         self.resize(max(560, default_w), 480)
         # 最小寬度≈2張卡片多一些（底部列會折行、不再撐寬）；最小高度足夠完整顯示練功頁
-        self.setMinimumSize(300, 450)
+        self.base_min_h = 450
+        self.setMinimumSize(300, self.base_min_h)
 
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0)
         self.frame = QFrame(); self.frame.setObjectName("root"); root.addWidget(self.frame)
@@ -1131,8 +1215,10 @@ class TimerWindow(QWidget):
     def _player_row(self):
         """角色技能/狀態卡（打Boss模式常駐顯示在 Boss 卡片上方，可用 ⚔ 按鈕收合）"""
         wrap = QWidget()
-        flow = FlowLayout(wrap, margin=0, hspacing=12, vspacing=12, center=True)
-        sp = wrap.sizePolicy(); sp.setHeightForWidth(True); sp.setVerticalPolicy(QSizePolicy.Minimum)
+        flow = FlowLayout(wrap, margin=0, hspacing=12, vspacing=12, center=True, hfw=False)
+        # 不用 heightForWidth：否則 QStackedWidget 會把「練功頁」的整頁高度也算進最小高度，
+        # 一開角色列視窗最小高度就爆增（下方留一大片空白）。改成依目前寬度自己算固定高度。
+        sp = wrap.sizePolicy(); sp.setHeightForWidth(False); sp.setVerticalPolicy(QSizePolicy.Fixed)
         wrap.setSizePolicy(sp)
         for sk in PLAYER_SKILLS:
             card = RingCard(sk["name"], sk["cd"])
@@ -1144,8 +1230,28 @@ class TimerWindow(QWidget):
             flow.addWidget(card)
         self.flows.append(flow)
         self.player_wrap = wrap
+        wrap.setFixedHeight(flow.heightForWidth(max(60, self.width() - 28)))
         wrap.setVisible(self.player_btn.isChecked())
         return wrap
+
+    def _sync_player_height(self):
+        """角色卡列高度依目前寬度重算（窄到需要折行時才變高，不會撐大最小高度）"""
+        wrap = getattr(self, "player_wrap", None)
+        if wrap is None:
+            return
+        avail = max(60, self.width() - 28)      # 扣掉外框左右邊界（14+14）
+        h = wrap.layout().heightForWidth(avail)
+        if h <= 0:
+            return
+        if wrap.minimumHeight() != h:
+            wrap.setFixedHeight(h)
+        # 只有真的折行（視窗太窄／卡片放很大）時才往上加最小高度，避免卡片被切掉
+        extra = max(0, h - int(CARD_H * self.zoom)) if wrap.isVisible() else 0
+        want = self.base_min_h + extra
+        if self.minimumHeight() != want:
+            self.setMinimumHeight(want)
+            if self.height() < want:
+                self.resize(self.width(), want)
 
     def _category_page(self, cat):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setObjectName("scroll")
@@ -1315,6 +1421,7 @@ class TimerWindow(QWidget):
 
     def _toggle_player(self, on):
         self.player_wrap.setVisible(on)
+        self._sync_player_height()
         self.cfg["show_player_skills"] = bool(on)
         self._save_config()
 
@@ -1330,6 +1437,7 @@ class TimerWindow(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._place_grip()
+        self._sync_player_height()
 
     # ---------- 尺規視窗 + 設定 ----------
     def _ralpha(self):
@@ -1347,6 +1455,7 @@ class TimerWindow(QWidget):
             # 再放到「長高後」主視窗的下方，避免遮到透明度那一排
             self.ruler_window.move(self.x(), self.y() + self.height() + 16)
             self.ruler_window.show(); self.ruler_window.raise_()
+            keep_logical_size(self.ruler_window)
         else:
             if self.ruler_window is not None:
                 self.ruler_window.hide()
@@ -1375,6 +1484,7 @@ class TimerWindow(QWidget):
             c.apply_zoom(self.zoom)
         for f in self.flows:
             f.invalidate()
+        self._sync_player_height()
         self.zoom_lbl.setText(f"{int(self.zoom * 100)}%")
 
     def _on_bg(self, v):
@@ -1498,6 +1608,7 @@ def main():
     app.setApplicationName("楓星小工具")
     app.setFont(QFont("Microsoft JhengHei", 10))
     w = TimerWindow(); w.show()
+    keep_logical_size(w)
     sys.exit(app.exec())
 
 

@@ -1,17 +1,17 @@
 # 楓星小工具
 
-![version](https://img.shields.io/badge/version-v1.2.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-v1.3.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 一個輔助遊玩 **Maplestory World 楓星** 而設計的輕量桌面小工具，把打 Boss 常用的**技能冷卻計時**、**Boss 血量刻度表**與**練功經驗計算**整合在一個可透明、可置頂、可自由縮放的浮動視窗裡，方便疊在遊戲畫面上使用。
 
-以 Python + PySide6 開發。目前版本 **v1.2.0.0**。
+以 Python + PySide6 開發。目前版本 **v1.3.0.0**。
 
 ---
 
 ## 1. 下載與啟動
 
 此至此處下載 MapleStarTool.exe
-https://github.com/hozircon/MapleStarTool/releases/tag/V1.2.0.0
+https://github.com/hozircon/MapleStarTool/releases/tag/V1.3.0.0
 ![MapleStarTool.exe](docs/images/release_download.png)
 > 若你想從原始碼執行，請參考 [3. 開發相關](#3-開發相關)。
 
