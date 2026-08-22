@@ -21,7 +21,9 @@ https://github.com/hozircon/MapleStarTool/releases/tag/V1.3.0.0
 
 程式分為兩大模式，透過視窗左上角的 **`練功` / `打Boss`** 切換；另有可獨立彈出的 **Boss 血量刻度表**浮窗。
 
-參考影片：https://youtu.be/Pw2LkldKjog、https://youtu.be/gFPkUO1Ya5E
+參考影片：
+V1.3.0.0：https://youtu.be/gFPkUO1Ya5E
+V1.0.0.0：https://youtu.be/Pw2LkldKjog
 
 ### 2-1. 練功經驗計算
 
