@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.3.0.0
+楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.4.0.0
 
 主視窗工具：
   A. 技能冷卻計時器
@@ -8,7 +8,8 @@
      • 卡片縮放鈕、兩段透明度(背景/方塊)、分類頁籤、↺重置、🔁巡迴、全部重置
      • 秒數客製：留空用預設，填數字用你填的秒數
      • ⚔ 角色卡：角色技能/狀態倒數（劍士魔法消除 80 秒、藥水CD 30 秒），
-       常駐顯示在 Boss 卡片上方，藍色標題與 BOSS 技能區別
+       以卡片形式插在目前分類卡片流的最前面兩格，跟 BOSS 卡一起排列/折行
+       （不再自成一列），藍色標題與 BOSS 技能區別；計時狀態跨分類共用
      • 按鍵配置：每張卡下方的「按鍵配置」鈕——點一下、按下想綁的實體按鍵即完成
        （Esc 取消、右鍵清除）。之後按綁定鍵就觸發倒數（全域偵測、不攔截按鍵）。
        ⚡ 開關：開＝倒數中按鍵也直接重新倒數；關（預設）＝READY 時按鍵才會開始。
@@ -54,6 +55,9 @@ CATEGORIES = [
     ]},
     {"name": "凡雷恩", "skills": [
         {"name": "召喚豬魔", "type": "counter", "count": 7},
+        {"name": "反頓", "cd": 60},
+        {"name": "鎖潛", "cd": 90},
+        {"name": "傳送", "cd": 90},
     ]},
     {"name": "普通/混沌龍王", "skills": [
         {"name": "魔法無效化", "cd": 40},
@@ -389,6 +393,21 @@ class FlowLayout(QLayout):
         self.setContentsMargins(margin, margin, margin, margin)
 
     def addItem(self, item):       self._items.append(item)
+
+    def insertWidget(self, index, w):
+        """插到第 index 張（角色卡固定排在最前面）"""
+        self.addWidget(w)                       # 由 QLayout 負責 reparent
+        item = self._items.pop()
+        self._items.insert(max(0, min(index, len(self._items))), item)
+        self.invalidate()
+
+    def detachWidget(self, w):
+        """把 widget 從此排版取下（不刪除 widget），供角色卡在分類頁之間搬移"""
+        for i, it in enumerate(self._items):
+            if it.widget() is w:
+                self._items.pop(i); self.invalidate(); return True
+        return False
+
     def count(self):               return len(self._items)
     def itemAt(self, i):           return self._items[i] if 0 <= i < len(self._items) else None
     def takeAt(self, i):           return self._items.pop(i) if 0 <= i < len(self._items) else None
@@ -1060,6 +1079,7 @@ class TimerWindow(QWidget):
                 self.hotkeys[k] = {"vk": NAME_TO_VK[v], "force": False}
         self.card_by_id = {}          # hotkey_id → 卡片
         self.cat_cards = []           # 每個 Boss 分類各自的卡片清單
+        self.cat_flows = []           # 每個 Boss 分類頁的流式排版（角色卡會插進目前這頁）
         self.player_cards = []        # 角色技能卡
         self._vk_map = {}             # 虛擬鍵碼 → 卡片清單
         self._capture_card = None     # 正在等待使用者按鍵的卡片
@@ -1092,13 +1112,15 @@ class TimerWindow(QWidget):
         self.main_stack.addWidget(exp_scroll)                  # 0 = 練功（可捲動，字不會被吃）
         boss_page = QWidget()
         bv = QVBoxLayout(boss_page); bv.setContentsMargins(0, 0, 0, 0); bv.setSpacing(4)
-        bv.addWidget(self._player_row())
+        self._build_player_cards()
         self.boss_stack = QStackedWidget()
         for cat in CATEGORIES:
             self.boss_stack.addWidget(self._category_page(cat))
         bv.addWidget(self.boss_stack, 1)
         self.main_stack.addWidget(boss_page)                   # 1 = 打Boss
         self.boss_combo.currentIndexChanged.connect(self.boss_stack.setCurrentIndex)
+        self.boss_stack.currentChanged.connect(lambda _i: self._mount_player_cards())
+        self._mount_player_cards()
 
         outer.addWidget(self._bottombar())
         self.timer = QTimer(self); self.timer.timeout.connect(self._tick); self.timer.start(TICK_MS)
@@ -1212,46 +1234,36 @@ class TimerWindow(QWidget):
         c = self.ruler_hi_color
         self.rswatch.setStyleSheet(f"background:{c.name()}; border-radius:4px; border:1px solid rgba(255,255,255,70);")
 
-    def _player_row(self):
-        """角色技能/狀態卡（打Boss模式常駐顯示在 Boss 卡片上方，可用 ⚔ 按鈕收合）"""
-        wrap = QWidget()
-        flow = FlowLayout(wrap, margin=0, hspacing=12, vspacing=12, center=True, hfw=False)
-        # 不用 heightForWidth：否則 QStackedWidget 會把「練功頁」的整頁高度也算進最小高度，
-        # 一開角色列視窗最小高度就爆增（下方留一大片空白）。改成依目前寬度自己算固定高度。
-        sp = wrap.sizePolicy(); sp.setHeightForWidth(False); sp.setVerticalPolicy(QSizePolicy.Fixed)
-        wrap.setSizePolicy(sp)
+    def _build_player_cards(self):
+        """建立角色技能/狀態卡（只建一次，之後在各分類頁之間搬移，計時狀態跨分類共用）"""
         for sk in PLAYER_SKILLS:
             card = RingCard(sk["name"], sk["cd"])
             card.name_lbl.setObjectName("playerSkillName")   # 藍色標題，與 BOSS 技能區別
             card.hotkey_id = f"角色::{sk['name']}"
+            card._flow = None
             self.card_by_id[card.hotkey_id] = card
             self._wire_card(card)
             self.cards.append(card); self.player_cards.append(card)
-            flow.addWidget(card)
-        self.flows.append(flow)
-        self.player_wrap = wrap
-        wrap.setFixedHeight(flow.heightForWidth(max(60, self.width() - 28)))
-        wrap.setVisible(self.player_btn.isChecked())
-        return wrap
 
-    def _sync_player_height(self):
-        """角色卡列高度依目前寬度重算（窄到需要折行時才變高，不會撐大最小高度）"""
-        wrap = getattr(self, "player_wrap", None)
-        if wrap is None:
+    def _mount_player_cards(self):
+        """把角色卡插進「目前分類頁」卡片流的最前面：不再自成一列，會跟 BOSS 卡一起排、一起折行"""
+        if not self.player_cards or not self.cat_flows:
             return
-        avail = max(60, self.width() - 28)      # 扣掉外框左右邊界（14+14）
-        h = wrap.layout().heightForWidth(avail)
-        if h <= 0:
-            return
-        if wrap.minimumHeight() != h:
-            wrap.setFixedHeight(h)
-        # 只有真的折行（視窗太窄／卡片放很大）時才往上加最小高度，避免卡片被切掉
-        extra = max(0, h - int(CARD_H * self.zoom)) if wrap.isVisible() else 0
-        want = self.base_min_h + extra
-        if self.minimumHeight() != want:
-            self.setMinimumHeight(want)
-            if self.height() < want:
-                self.resize(self.width(), want)
+        show = self.player_btn.isChecked()
+        idx = self.boss_stack.currentIndex()
+        flow = self.cat_flows[idx] if (show and 0 <= idx < len(self.cat_flows)) else None
+        for i, card in enumerate(self.player_cards):
+            old = getattr(card, "_flow", None)
+            if old is flow:
+                continue
+            if old is not None:
+                old.detachWidget(card)
+            card._flow = flow
+            if flow is None:
+                card.hide()
+            else:
+                flow.insertWidget(i, card)      # 角色卡固定佔最前面兩格
+                card.show()
 
     def _category_page(self, cat):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setObjectName("scroll")
@@ -1268,6 +1280,7 @@ class TimerWindow(QWidget):
             self._wire_card(card)
             self.cards.append(card); cat_list.append(card); flow.addWidget(card)
         self.cat_cards.append(cat_list)
+        self.cat_flows.append(flow)
         self.flows.append(flow); scroll.setWidget(page)
         return scroll
 
@@ -1420,8 +1433,7 @@ class TimerWindow(QWidget):
             card.hotkey_activate()
 
     def _toggle_player(self, on):
-        self.player_wrap.setVisible(on)
-        self._sync_player_height()
+        self._mount_player_cards()
         self.cfg["show_player_skills"] = bool(on)
         self._save_config()
 
@@ -1437,7 +1449,6 @@ class TimerWindow(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._place_grip()
-        self._sync_player_height()
 
     # ---------- 尺規視窗 + 設定 ----------
     def _ralpha(self):
@@ -1484,7 +1495,6 @@ class TimerWindow(QWidget):
             c.apply_zoom(self.zoom)
         for f in self.flows:
             f.invalidate()
-        self._sync_player_height()
         self.zoom_lbl.setText(f"{int(self.zoom * 100)}%")
 
     def _on_bg(self, v):

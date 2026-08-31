@@ -1,17 +1,17 @@
 # 楓星小工具
 
-![version](https://img.shields.io/badge/version-v1.3.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-v1.4.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 一個輔助遊玩 **Maplestory World 楓星** 而設計的輕量桌面小工具，把打 Boss 常用的**技能冷卻計時**、**Boss 血量刻度表**與**練功經驗計算**整合在一個可透明、可置頂、可自由縮放的浮動視窗裡，方便疊在遊戲畫面上使用。
 
-以 Python + PySide6 開發。目前版本 **v1.3.0.0**。
+以 Python + PySide6 開發。目前版本 **v1.4.0.0**。
 
 ---
 
 ## 1. 下載與啟動
 
 此至此處下載 MapleStarTool.exe
-https://github.com/hozircon/MapleStarTool/releases/tag/V1.3.0.0
+https://github.com/hozircon/MapleStarTool/releases/tag/V1.4.0.0
 ![MapleStarTool.exe](docs/images/release_download.png)
 > 若你想從原始碼執行，請參考 [3. 開發相關](#3-開發相關)。
 
@@ -64,7 +64,7 @@ https://github.com/hozircon/MapleStarTool/releases/tag/V1.3.0.0
 
 ![角色卡與按鍵配置](docs/images/player-cards.png)
 
-Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」倒數卡，常駐在 Boss 卡片上方（切換 Boss 也不會消失），**標題為藍色**以與金色的 BOSS 技能卡區別。目前內建：
+Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」倒數卡。角色卡就是一般卡片，固定排在目前分類**卡片流的最前面兩格**，與 BOSS 卡一起排列、一起折行（不會自己卡掉一整列），**標題為藍色**以與金色的 BOSS 技能卡區別；切換 Boss 分類不會消失，倒數狀態也會延續。目前內建：
 
 - **劍士「魔法消除」**：技能本身 CD 為 60 秒，但 BOSS 會抵抗 80 秒，因此卡片倒數 **80 秒**，READY 時才能再次對 BOSS 上魔法消除。
 - **藥水CD**：部分 BOSS 戰喝藥後需等待才能再喝，預設 **30 秒**（可在卡片秒數欄客製）。
@@ -191,6 +191,7 @@ CATEGORIES = [
     ]},
     {"name": "凡雷恩", "skills": [
         {"name": "召喚豬魔", "type": "counter", "count": 7},  # 計次技能
+        {"name": "反頓", "cd": 60},
     ]},
 ]
 ```
