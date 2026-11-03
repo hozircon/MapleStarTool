@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.4.0.0
+楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.5.0.0
 
 主視窗工具：
   A. 技能冷卻計時器
@@ -8,8 +8,9 @@
      • 卡片縮放鈕、兩段透明度(背景/方塊)、分類頁籤、↺重置、🔁巡迴、全部重置
      • 秒數客製：留空用預設，填數字用你填的秒數
      • ⚔ 角色卡：角色技能/狀態倒數（劍士魔法消除 80 秒、藥水CD 30 秒），
-       以卡片形式插在目前分類卡片流的最前面兩格，跟 BOSS 卡一起排列/折行
+       以卡片形式插在目前分類卡片流的最前面，跟 BOSS 卡一起排列/折行
        （不再自成一列），藍色標題與 BOSS 技能區別；計時狀態跨分類共用
+     • ＋自訂：新增自訂倒數卡（名稱/秒數可改、✕ 刪除），存在設定檔
      • 按鍵配置：每張卡下方的「按鍵配置」鈕——點一下、按下想綁的實體按鍵即完成
        （Esc 取消、右鍵清除）。之後按綁定鍵就觸發倒數（全域偵測、不攔截按鍵）。
        ⚡ 開關：開＝倒數中按鍵也直接重新倒數；關（預設）＝READY 時按鍵才會開始。
@@ -20,7 +21,7 @@
 
 獨立浮動視窗：
   B. 尺規（頁籤右側「📏 尺規」開關鈕彈出，與主視窗共存、永遠置頂）
-     • 像直尺：0–100%，每10%大刻度(標數字)、每5%小刻度；刻度可標記顏色
+     • 像直尺：0–100%，每10%大刻度(標數字)、每5%中刻度、每2.5%小刻度；刻度可標記顏色
      • 極簡：左上「拖曳握把」+ 右上「✕」；透明度/顏色/清除在主視窗設定
      • 底冊透明度可調 → 拖到 Boss 血條上對齊看攻略進度
 
@@ -65,6 +66,7 @@ CATEGORIES = [
     ]},
     {"name": "阿卡伊農", "skills": [
         {"name": "尾段全圖殺", "cd": 70},
+        {"name": "鎖潛", "cd": 90},
     ]},
     {"name": "皮卡啾", "skills": [
         {"name": "反盾", "cd": 45},
@@ -75,6 +77,10 @@ CATEGORIES = [
         {"name": "鎖潛", "cd": 90},
         {"name": "活屍", "cd": 60},
         {"name": "傳送", "cd": 90},
+        {"name": "米哈逸反盾", "cd": 70},
+    ]},
+    {"name": "希拉", "skills": [
+        {"name": "反頓", "cd": 80},
     ]},
 ]
 
@@ -85,6 +91,10 @@ PLAYER_SKILLS = [
     {"name": "魔法消除", "cd": 80},
     {"name": "藥水CD", "cd": 30},
 ]
+
+#   自訂卡：玩家在「⚔ 角色」區自行新增/刪除/改名的倒數卡（存在 maple_star_config.json）
+#   第一次執行時預設給一張「自訂」卡，秒數 0（需自行填入秒數才會倒數）
+DEFAULT_CUSTOM_CARDS = [{"id": "c1", "name": "自訂", "secs": ""}]
 
 CARD_W, CARD_H = 120, 158
 CTRL_H = 22
@@ -460,8 +470,9 @@ class FlowLayout(QLayout):
 #  A. 技能卡片
 # =========================================================================
 class RingCard(QFrame):
-    def __init__(self, name, cd):
+    def __init__(self, name, cd, editable=False):
         super().__init__()
+        self.editable = editable; self.del_btn = None
         self.default_cd = float(cd); self.total = float(cd)
         self.remaining = 0.0; self.active = False; self.loop = False
         self._deadline = 0.0
@@ -469,8 +480,22 @@ class RingCard(QFrame):
         self.hotkey_id = None; self.hotkey_vk = None; self._last_hotkey = 0.0
 
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(4)
-        self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
-        self.name_lbl.setObjectName("skillName"); lay.addWidget(self.name_lbl)
+        if editable:
+            # 自訂卡：名稱可直接改、右上 ✕ 刪除
+            top = QHBoxLayout(); top.setSpacing(2)
+            self.name_lbl = QLineEdit(name); self.name_lbl.setAlignment(Qt.AlignCenter)
+            self.name_lbl.setObjectName("customName"); self.name_lbl.setFrame(False)
+            self.name_lbl.setMaxLength(10); self.name_lbl.setPlaceholderText("名稱")
+            self.name_lbl.setToolTip("點一下可修改名稱")
+            self.del_btn = QPushButton("✕"); self.del_btn.setObjectName("cardDel")
+            self.del_btn.setCursor(Qt.PointingHandCursor); self.del_btn.setFocusPolicy(Qt.NoFocus)
+            self.del_btn.setToolTip("刪除這張自訂卡")
+            self._del_pad = QWidget()                      # 左側等寬留白，讓名稱維持置中
+            top.addWidget(self._del_pad, 0); top.addWidget(self.name_lbl, 1); top.addWidget(self.del_btn, 0)
+            lay.addLayout(top)
+        else:
+            self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
+            self.name_lbl.setObjectName("skillName"); lay.addWidget(self.name_lbl)
         lay.addStretch(1)
         row = QHBoxLayout(); row.setSpacing(4)
         self.sec_input = QLineEdit(); self.sec_input.setPlaceholderText(str(int(cd)))
@@ -508,6 +533,9 @@ class RingCard(QFrame):
         self.sec_input.setFixedHeight(ch)
         self.loop_btn.setFixedSize(ch, ch); self.reset_btn.setFixedSize(ch, ch)
         self.key_btn.setFixedHeight(ch); self.force_btn.setFixedSize(ch, ch)
+        if self.del_btn is not None:
+            dh = max(14, int(16 * z)); self.del_btn.setFixedSize(dh, dh); self._del_pad.setFixedSize(dh, dh)
+            fd = QFont(); fd.setPixelSize(max(8, int(10 * z))); self.del_btn.setFont(fd)
         fn = QFont("Microsoft JhengHei"); fn.setPixelSize(max(11, int(14 * z))); fn.setBold(True)
         self.name_lbl.setFont(fn)
         fi = QFont("Microsoft JhengHei"); fi.setPixelSize(max(9, int(12 * z)))
@@ -590,14 +618,16 @@ class RingCard(QFrame):
 
     def mousePressEvent(self, e):
         if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
-                                                    self.key_btn, self.force_btn):
+                                                    self.key_btn, self.force_btn,
+                                                    self.name_lbl if self.editable else None, self.del_btn):
             return
         if e.button() == Qt.LeftButton:
             self.trigger()
 
     def mouseDoubleClickEvent(self, e):
         if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
-                                                    self.key_btn, self.force_btn):
+                                                    self.key_btn, self.force_btn,
+                                                    self.name_lbl if self.editable else None, self.del_btn):
             return
         if e.button() == Qt.LeftButton:
             self.restart()
@@ -783,7 +813,8 @@ class CounterCard(QFrame):
 #  B. 尺規（極簡浮動視窗：左上握把 + 右上✕；設定在主視窗）
 # =========================================================================
 class RulerWidget(QWidget):
-    MARGIN = 16; EDGE = 12; BASELINE = 20; MAJOR = 24; MINOR = 12
+    MARGIN = 16; EDGE = 12; BASELINE = 20; MAJOR = 24; MID = 16; MINOR = 8
+    STEPS = 40          # 0–100% 切 40 格 → 每格 2.5%
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -799,14 +830,15 @@ class RulerWidget(QWidget):
 
     def _tick_x(self, i):
         usable = self.width() - 2 * self.MARGIN
-        return self.MARGIN + usable * i / 20
+        return self.MARGIN + usable * i / self.STEPS
 
     def _nearest_tick(self, x):
         usable = self.width() - 2 * self.MARGIN
         if usable <= 0:
             return None
-        i = round((x - self.MARGIN) / usable * 20)
-        return i if 0 <= i <= 20 and abs(x - self._tick_x(i)) <= 6 else None
+        i = round((x - self.MARGIN) / usable * self.STEPS)
+        tol = min(6, usable / self.STEPS / 2)       # 刻度變密，點擊判定範圍不可重疊
+        return i if 0 <= i <= self.STEPS and abs(x - self._tick_x(i)) <= tol else None
 
     def mousePressEvent(self, e):
         x, y = e.position().x(), e.position().y()
@@ -867,16 +899,18 @@ class RulerWidget(QWidget):
         p.setPen(QPen(QColor(255, 255, 255, 175), 3.2)); p.drawLine(M, b, self.width() - M, b)
         p.setPen(QPen(QColor(45, 45, 45), 2)); p.drawLine(M, b, self.width() - M, b)
         fnt = QFont("Arial"); fnt.setPixelSize(11); fnt.setBold(True); p.setFont(fnt)
-        for i in range(21):
-            x = self._tick_x(i); major = (i % 2 == 0)
-            ln = self.MAJOR if major else self.MINOR; mk = i in self.marked
+        for i in range(self.STEPS + 1):
+            x = self._tick_x(i); major = (i % 4 == 0); mid = (i % 2 == 0)
+            ln = self.MAJOR if major else (self.MID if mid else self.MINOR); mk = i in self.marked
             self._halo(p, x, b, b + ln)
             col = self.hi_color if mk else QColor(30, 30, 30)
-            p.setPen(QPen(col, 2.8 if mk else 1.6)); p.drawLine(QPointF(x, b), QPointF(x, b + ln))
+            w = 2.8 if mk else (1.6 if mid else 1.2)
+            p.setPen(QPen(col, w)); p.drawLine(QPointF(x, b), QPointF(x, b + ln))
             if major:
+                lbl = f"{i * 100 // self.STEPS}"
                 rect = QRectF(x - 16, b + ln + 1, 32, 14)
-                self._halo_text(p, rect, f"{i * 5}")
-                p.setPen(col if mk else QColor(35, 35, 35)); p.drawText(rect, Qt.AlignCenter, f"{i * 5}")
+                self._halo_text(p, rect, lbl)
+                p.setPen(col if mk else QColor(35, 35, 35)); p.drawText(rect, Qt.AlignCenter, lbl)
         p.setPen(QPen(QColor(120, 120, 120, 200), 2))
         for hx in (5, self.width() - 5):
             p.drawLine(QPointF(hx, b - 4), QPointF(hx, b + self.MAJOR + 6))
@@ -1184,6 +1218,11 @@ class TimerWindow(QWidget):
         self.player_btn.setChecked(bool(self.cfg.get("show_player_skills", True)))
         self.player_btn.toggled.connect(self._toggle_player)
         h.addWidget(self.player_btn, 0)
+        self.add_custom_btn = QPushButton("＋自訂"); self.add_custom_btn.setObjectName("toolTab")
+        self.add_custom_btn.setCursor(Qt.PointingHandCursor)
+        self.add_custom_btn.setToolTip("新增一張自訂倒數卡（名稱、秒數可自行修改，卡片右上 ✕ 刪除）")
+        self.add_custom_btn.clicked.connect(self._add_custom_card)
+        h.addWidget(self.add_custom_btn, 0)
         self.ruler_btn = QPushButton("📏 血量刻度"); self.ruler_btn.setObjectName("toolTab")
         self.ruler_btn.setCheckable(True); self.ruler_btn.setCursor(Qt.PointingHandCursor)
         self.ruler_btn.setToolTip("彈出 Boss 血量刻度浮窗（可拖到血條上）")
@@ -1244,6 +1283,67 @@ class TimerWindow(QWidget):
             self.card_by_id[card.hotkey_id] = card
             self._wire_card(card)
             self.cards.append(card); self.player_cards.append(card)
+        customs = self.cfg.get("custom_cards")
+        if not isinstance(customs, list):
+            customs = [dict(c) for c in DEFAULT_CUSTOM_CARDS]
+        self.custom_defs = []
+        for d in customs:
+            if isinstance(d, dict) and isinstance(d.get("id"), str):
+                ent = {"id": d["id"], "name": str(d.get("name", "")), "secs": str(d.get("secs", ""))}
+                self.custom_defs.append(ent)
+                self._make_custom_card(ent)
+        self.cfg["custom_cards"] = self.custom_defs
+
+    def _make_custom_card(self, ent):
+        """建立一張自訂卡（名稱/秒數變更即存檔）"""
+        card = RingCard(ent["name"], 0, editable=True)
+        card.sec_input.setText(ent["secs"])
+        card.hotkey_id = f"角色::自訂::{ent['id']}"
+        card._flow = None; card._custom = ent
+        self.card_by_id[card.hotkey_id] = card
+        self._wire_card(card)
+        card.name_lbl.textChanged.connect(lambda t, e=ent: self._on_custom_edit(e, "name", t))
+        card.sec_input.textChanged.connect(lambda t, e=ent: self._on_custom_edit(e, "secs", t))
+        card.del_btn.clicked.connect(lambda _=False, c=card: self._delete_custom_card(c))
+        self.cards.append(card); self.player_cards.append(card)
+        return card
+
+    def _on_custom_edit(self, ent, key, text):
+        ent[key] = text.strip() if key == "secs" else text
+        self._save_config()
+
+    def _add_custom_card(self):
+        used = {d["id"] for d in self.custom_defs}
+        n = 1
+        while f"c{n}" in used:
+            n += 1
+        ent = {"id": f"c{n}", "name": "自訂", "secs": ""}
+        self.custom_defs.append(ent)
+        card = self._make_custom_card(ent)
+        card.apply_zoom(self.zoom); card.set_block_alpha(self.block_alpha)
+        self._save_config()
+        if not self.player_btn.isChecked():
+            self.player_btn.setChecked(True)      # 會觸發 _mount_player_cards
+        else:
+            self._mount_player_cards()
+        card.name_lbl.setFocus(); card.name_lbl.selectAll()
+
+    def _delete_custom_card(self, card):
+        if self._capture_card is card:
+            self._end_capture()
+        flow = getattr(card, "_flow", None)
+        if flow is not None:
+            flow.detachWidget(card)
+        card._flow = None
+        for lst in (self.cards, self.player_cards):
+            if card in lst:
+                lst.remove(card)
+        self.card_by_id.pop(card.hotkey_id, None)
+        self.hotkeys.pop(card.hotkey_id, None)
+        if card._custom in self.custom_defs:
+            self.custom_defs.remove(card._custom)
+        card.hide(); card.deleteLater()
+        self._rebuild_vk_map(); self._save_config()
 
     def _mount_player_cards(self):
         """把角色卡插進「目前分類頁」卡片流的最前面：不再自成一列，會跟 BOSS 卡一起排、一起折行"""
@@ -1262,7 +1362,7 @@ class TimerWindow(QWidget):
             if flow is None:
                 card.hide()
             else:
-                flow.insertWidget(i, card)      # 角色卡固定佔最前面兩格
+                flow.insertWidget(i, card)      # 角色卡（含自訂卡）固定排在最前面
                 card.show()
 
     def _category_page(self, cat):
@@ -1551,6 +1651,11 @@ class TimerWindow(QWidget):
         #rulerSet {{ background: rgba(91,155,255,28); border:1px solid rgba(91,155,255,90); border-radius:10px; }}
         QLabel#skillName {{ color:rgb(241,201,74); background:transparent; }}
         QLabel#playerSkillName {{ color:#5b9bff; background:transparent; }}
+        QLineEdit#customName {{ color:#5b9bff; background:transparent; border:none; padding:0;
+                selection-background-color:rgba(91,155,255,120); }}
+        QLineEdit#customName:focus {{ background:rgba(0,0,0,90); border-radius:4px; }}
+        #cardDel {{ background:transparent; color:#7d8494; border:none; border-radius:4px; padding:0; }}
+        #cardDel:hover {{ background:#ff5757; color:white; }}
 
         #keyBtn {{ background:rgba(91,155,255,36); color:#9dc1ff; border:1px solid rgba(91,155,255,90);
                 border-radius:6px; padding:0 4px; }}

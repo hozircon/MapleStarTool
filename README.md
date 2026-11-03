@@ -1,17 +1,17 @@
 # 楓星小工具
 
-![version](https://img.shields.io/badge/version-v1.4.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-v1.5.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 一個輔助遊玩 **Maplestory World 楓星** 而設計的輕量桌面小工具，把打 Boss 常用的**技能冷卻計時**、**Boss 血量刻度表**與**練功經驗計算**整合在一個可透明、可置頂、可自由縮放的浮動視窗裡，方便疊在遊戲畫面上使用。
 
-以 Python + PySide6 開發。目前版本 **v1.4.0.0**。
+以 Python + PySide6 開發。目前版本 **v1.5.0.0**。
 
 ---
 
 ## 1. 下載與啟動
 
 此至此處下載 MapleStarTool.exe
-https://github.com/hozircon/MapleStarTool/releases/tag/V1.4.0.0
+https://github.com/hozircon/MapleStarTool/releases/tag/V1.5.0.0
 ![MapleStarTool.exe](docs/images/release_download.png)
 > 若你想從原始碼執行，請參考 [3. 開發相關](#3-開發相關)。
 
@@ -66,12 +66,22 @@ V1.0.0.0：https://youtu.be/Pw2LkldKjog
 
 ![角色卡與按鍵配置](docs/images/player-cards.png)
 
-Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」倒數卡。角色卡就是一般卡片，固定排在目前分類**卡片流的最前面兩格**，與 BOSS 卡一起排列、一起折行（不會自己卡掉一整列），**標題為藍色**以與金色的 BOSS 技能卡區別；切換 Boss 分類不會消失，倒數狀態也會延續。目前內建：
+Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」倒數卡。角色卡就是一般卡片，固定排在目前分類**卡片流的最前面**，與 BOSS 卡一起排列、一起折行（不會自己卡掉一整列），**標題為藍色**以與金色的 BOSS 技能卡區別；切換 Boss 分類不會消失，倒數狀態也會延續。目前內建：
 
 - **劍士「魔法消除」**：技能本身 CD 為 60 秒，但 BOSS 會抵抗 80 秒，因此卡片倒數 **80 秒**，READY 時才能再次對 BOSS 上魔法消除。
 - **藥水CD**：部分 BOSS 戰喝藥後需等待才能再喝，預設 **30 秒**（可在卡片秒數欄客製）。
 
-顯示/隱藏狀態會自動記住。清單在 `maple_star_tool.py` 上方的 `PLAYER_SKILLS` 設定。
+顯示/隱藏狀態會自動記住。內建清單在 `maple_star_tool.py` 上方的 `PLAYER_SKILLS` 設定。
+
+#### ＋自訂卡
+
+除了內建的魔法消除與藥水CD，可以按 Boss 工具列的 **＋自訂** 新增自己的倒數卡（例如自己的爆發 BUFF、其他職業技能）：
+
+- **名稱**：點卡片上方的藍色名稱即可直接修改。
+- **秒數**：預設 **0**，在秒數欄填入秒數後才會開始倒數。
+- **刪除**：點卡片右上角的 **✕**。
+- 自訂卡和內建角色卡一樣排在卡片流最前面、跨 Boss 分類共用，也能設定按鍵配置與 ⚡。
+- 名稱與秒數儲存在 `maple_star_config.json`，**重啟後保留**；第一次執行會預設一張「自訂」卡。
 
 #### 按鍵配置（免滑鼠觸發倒數）
 
@@ -119,7 +129,8 @@ Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」�
 刻度表本身操作：
 
 - **拖曳中段** → 移動整個浮窗；**拖曳左右端** → 縮放長度（對齊血條）。
-- **點任一刻度** → 切換標記顏色（標出攻略要注意的 % 節點）。
+- 刻度分三種長度：**每 10%** 長刻度並標數字、**每 5%** 中刻度、**每 2.5%** 短刻度（例如 12.5%、17.5%）。
+- **點任一刻度**（含 2.5% 短刻度）→ 切換標記顏色（標出攻略要注意的 % 節點）。
 - 左上角 **⠿ 握把** 移動、右上角 **✕** 關閉。
 
 把它拖到 Boss 血條上、對齊兩端，即可依刻度掌握攻略進度：
