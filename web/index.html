@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12141b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="楓星 Maplestory World Boss 技能倒數（手機版）：點一下開始、快速點兩下重新倒數，可開語音提示。">
+<title>楓星小工具 手機版</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Noto+Sans+TC:wght@500;700&display=swap">
+<style>
+/* 版面：單一畫面不捲動。上方工具列 + 依卡片數量自動算欄列的格狀區（JS 計算），卡片內容隨格子大小縮放（container queries）。
+   配色沿用桌面版：深藍底、READY 綠、冷卻黃→紅、BOSS 金色標題、角色藍色標題。 */
+:root {
+  color-scheme: dark;
+  --ground: #12141b;
+  --card: #20242f;
+  --card-hi: #2a2f3c;
+  --ctrl: #303442;
+  --line: rgba(255, 255, 255, .08);
+  --ink: #e9ecf2;
+  --muted: #8a91a3;
+  --ready: #2ee6a6;
+  --cool-a: #ffc454;
+  --cool-b: #ff5757;
+  --boss: #f1c94a;
+  --player: #5b9bff;
+  --f-ui: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+  --f-num: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", Arial, sans-serif;
+  --gap: 8px;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--f-ui);
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none; user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+.app {
+  height: 100%;
+  display: flex; flex-direction: column; gap: var(--gap);
+  padding-top: max(10px, env(safe-area-inset-top, 0px));
+  padding-bottom: max(6px, env(safe-area-inset-bottom, 0px));
+  padding-left: max(12px, env(safe-area-inset-left, 0px));
+  padding-right: max(12px, env(safe-area-inset-right, 0px));
+}
+
+/* ---------- 工具列 ---------- */
+.bar { display: flex; gap: 6px; align-items: stretch; }
+.select-wrap { position: relative; flex: 1; min-width: 0; }
+.select-wrap::after {
+  content: ""; position: absolute; right: 12px; top: 50%; width: 7px; height: 7px;
+  border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted);
+  transform: translateY(-70%) rotate(45deg); pointer-events: none;
+}
+select {
+  width: 100%; height: 44px; appearance: none; -webkit-appearance: none;
+  background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 12px;
+  font: 700 16px var(--f-ui); padding: 0 30px 0 12px;
+  text-overflow: ellipsis; white-space: nowrap; overflow: hidden;
+}
+.chip {
+  height: 44px; min-width: 52px; padding: 0 11px; border-radius: 12px;
+  background: var(--card); color: var(--muted); border: 1px solid var(--line);
+  font: 700 14px var(--f-ui); cursor: pointer; white-space: nowrap;
+}
+.chip[aria-pressed="true"] { background: var(--player); color: #0d1424; border-color: transparent; }
+.chip.edit[aria-pressed="true"] { background: var(--ink); color: var(--ground); }
+.chip:focus-visible, select:focus-visible, .card:focus-visible, input:focus-visible { outline: 2px solid var(--ready); outline-offset: 2px; }
+
+.editbar { display: none; gap: 6px; align-items: center; }
+.editing .editbar { display: flex; }
+.editbar .chip { height: 38px; color: var(--ink); }
+.editbar .chip.danger { color: var(--cool-b); }
+.editbar .chip.danger.armed { background: var(--cool-b); color: #fff; }
+.editbar .note { margin-left: auto; font-size: 12px; color: var(--muted); text-align: right; line-height: 1.3; }
+
+/* ---------- 卡片格 ---------- */
+.grid {
+  flex: 1; min-height: 0;
+  display: grid; gap: var(--gap);
+  justify-content: center; align-content: center;
+}
+.card {
+  position: relative; container-type: size;
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 4px; padding: 8px; overflow: hidden; cursor: pointer;
+  transition: background .15s, transform .1s;
+}
+.card:active { background: var(--card-hi); }
+.card.press { transform: scale(.97); }
+.card::after {          /* 長按進度：底部一條線填滿＝重新倒數 */
+  content: ""; position: absolute; left: 0; bottom: 0; height: 4px; width: 0;
+  background: var(--cool-a);
+}
+.card.counter.press::after { width: 100%; transition: width .45s linear; }
+.card.done { border-color: var(--ready); }
+
+.name {
+  font-weight: 700; font-size: max(12px, min(13cqw, 11cqh)); line-height: 1.2;
+  color: var(--boss); text-align: center; max-width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.card.player .name { color: var(--player); }
+.ring {
+  position: relative; width: min(74cqw, 66cqh); aspect-ratio: 1; max-width: 100%;
+  container-type: inline-size;
+}
+.ring svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+.ring circle { fill: none; stroke-width: 9; stroke-linecap: round; }
+.ring .track { stroke: rgba(255, 255, 255, .1); }
+.ring .prog { stroke: var(--ready); transition: stroke .3s; }
+.val {
+  position: absolute; inset: 0; display: grid; place-items: center;
+  font-family: var(--f-num); font-weight: 700; font-size: 40cqw; line-height: 1;
+  font-variant-numeric: tabular-nums; color: var(--ready);
+}
+.val.ready { font-size: 21cqw; letter-spacing: .02em; }
+.val.count { font-size: 30cqw; color: var(--ink); }
+.sub { font-size: max(10px, 7cqmin); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* 設定模式：卡片改顯示輸入欄 */
+.edit-fields { display: none; flex-direction: column; align-items: center; gap: 4cqh; width: 100%; }
+.editing .card { cursor: default; }
+.editing .card .ring, .editing .card .sub { display: none; }
+.editing .card .edit-fields { display: flex; }
+.field-label { font-size: max(11px, 8cqmin); color: var(--muted); }
+.card input {
+  width: 100%; max-width: 160px; height: max(36px, 22cqh); border-radius: 10px;
+  background: rgba(0, 0, 0, .35); color: var(--ink); border: 1px solid var(--line);
+  font: 700 max(16px, 13cqmin) var(--f-num); text-align: center; font-variant-numeric: tabular-nums;
+}
+.card input.name-input { font-family: var(--f-ui); font-size: max(16px, 10cqmin); color: var(--player); }
+.card input::placeholder { color: #5d6476; }
+.del {
+  position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; border-radius: 10px;
+  border: none; background: rgba(255, 87, 87, .16); color: var(--cool-b);
+  font: 700 18px var(--f-ui); cursor: pointer; display: none;
+}
+.editing .del { display: block; }
+.card.add {
+  display: none; border-style: dashed; border-color: rgba(91, 155, 255, .5);
+  background: transparent; color: var(--player); font-weight: 700; font-size: max(14px, 10cqmin);
+}
+.editing .card.add { display: flex; cursor: pointer; }
+
+.hint { font-size: 12px; color: var(--muted); text-align: center; }
+.hint b { color: var(--ink); font-weight: 500; }
+.editing .hint { display: none; }
+
+.toast {
+  position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 20px); opacity: 0; pointer-events: none;
+  background: var(--ink); color: var(--ground); font-weight: 700; font-size: 14px;
+  padding: 10px 16px; border-radius: 12px; transition: opacity .2s, transform .2s;
+  max-width: calc(100% - 32px); text-align: center;
+}
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+@media (prefers-reduced-motion: reduce) {
+  .card, .toast, .ring .prog { transition: none; }
+  .card.press::after { transition: none; }
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="bar">
+    <div class="select-wrap"><select id="boss" aria-label="選擇 Boss"></select></div>
+    <button class="chip" id="btnPlayer" aria-pressed="true" title="顯示/隱藏角色卡">角色</button>
+    <button class="chip" id="btnVoice" aria-pressed="false" title="倒數結束時念出技能名稱">語音</button>
+    <button class="chip edit" id="btnEdit" aria-pressed="false">設定</button>
+  </div>
+  <div class="editbar">
+    <button class="chip" id="btnAdd">＋ 自訂卡</button>
+    <button class="chip danger" id="btnReset">全部重置</button>
+    <div class="note">秒數留空＝用預設<br>設定會存在這支手機</div>
+  </div>
+  <div class="grid" id="grid"></div>
+  <div class="hint"><b>點一下</b>開始倒數　·　<b>快速點兩下</b>重新倒數</div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+// ===== Boss 資料：讀取 bosses.json（與桌面版 data/bosses.json 共用） =====
+let CATEGORIES = [], PLAYER_SKILLS = [];
+const LONG_MS = 450;
+const STORE_KEY = "mapleStarMobile.v1";
+
+// ===== 狀態（存在 localStorage） =====
+const S = Object.assign({
+  boss: 0, showPlayer: true, voice: false,
+  secs: {},                                        // 卡片id → 自訂秒數/次數（字串，空＝預設）
+  custom: [{ id: "c1", name: "自訂", secs: "" }],   // 自訂卡
+  run: {},                                         // 卡片id → { end: 結束時間(ms), total: 秒 }
+  counts: {},                                      // 計次卡 id → 目前次數
+}, load());
+
+function load() { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch (e) { return {}; } }
+function save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); } catch (e) {} }
+
+// ===== 卡片定義 =====
+function currentDefs() {
+  const list = [];
+  if (S.showPlayer) {
+    PLAYER_SKILLS.forEach(p => list.push({ id: "角色::" + p.name, name: p.name, cd: p.cd, player: true }));
+    S.custom.forEach(c => list.push({ id: "角色::自訂::" + c.id, name: c.name, cd: 0, player: true, custom: c }));
+  }
+  const cat = CATEGORIES[S.boss];
+  cat.skills.forEach(s => list.push({
+    id: cat.name + "::" + s.name, name: s.name,
+    cd: s.cd || 0, counter: s.type === "counter", max: s.count || 1,
+  }));
+  return list;
+}
+function nameOf(id) {
+  const c = S.custom.find(x => id === "角色::自訂::" + x.id);
+  if (c) return c.name || "自訂";
+  return id.split("::").pop();
+}
+function secsOf(def) {
+  const v = def.custom ? def.custom.secs : S.secs[def.id];
+  const n = parseFloat(v);
+  return v !== undefined && v !== "" && isFinite(n) ? n : (def.counter ? def.max : def.cd);
+}
+
+// ===== 動作 =====
+function start(def, force) {
+  if (def.counter) {
+    const mx = secsOf(def), n = S.counts[def.id] || 0;
+    if (force) S.counts[def.id] = 0;
+    else if (n < mx) S.counts[def.id] = n + 1;
+    buzz(force ? 40 : 15); save(); paint(); return;
+  }
+  if (S.run[def.id] && !force) { buzz(8); return; }       // 倒數中單擊：不動作
+  const secs = secsOf(def);
+  if (!(secs > 0)) { toast("先到「設定」填入秒數"); return; }
+  S.run[def.id] = { end: Date.now() + secs * 1000, total: secs };
+  buzz(force ? 40 : 15); save(); keepAwake(); paint();
+}
+function resetAll() { S.run = {}; S.counts = {}; save(); paint(); }
+
+// ===== 畫面 =====
+const grid = document.getElementById("grid");
+let defs = [], refs = [];
+const RING = '<svg viewBox="0 0 100 100" aria-hidden="true"><circle class="track" cx="50" cy="50" r="44"/>' +
+             '<circle class="prog" cx="50" cy="50" r="44" pathLength="100" stroke-dasharray="100 100"/></svg>';
+
+function build() {
+  defs = currentDefs(); refs = [];
+  grid.innerHTML = "";
+  defs.forEach(def => {
+    const el = document.createElement("div");
+    el.className = "card" + (def.player ? " player" : "") + (def.counter ? " counter" : "");
+    el.tabIndex = 0;
+    const fieldLabel = def.counter ? "目標次數" : "秒數";
+    const ph = def.counter ? def.max : def.cd;
+    el.innerHTML =
+      (def.custom
+        ? '<button class="del" aria-label="刪除這張自訂卡">✕</button>'
+        : "") +
+      '<div class="name"></div>' +
+      '<div class="ring">' + RING + '<div class="val"></div></div>' +
+      '<div class="sub"></div>' +
+      '<div class="edit-fields">' +
+        (def.custom ? '<input class="name-input" maxlength="10" placeholder="名稱" aria-label="卡片名稱">' : "") +
+        '<span class="field-label">' + fieldLabel + '</span>' +
+        '<input class="secs" inputmode="decimal" placeholder="' + ph + '" aria-label="' + fieldLabel + '">' +
+      '</div>';
+    el.querySelector(".name").textContent = def.name || "自訂";
+    const secIn = el.querySelector("input.secs");
+    secIn.id = "secs-" + def.id;
+    secIn.value = def.custom ? def.custom.secs : (S.secs[def.id] || "");
+    secIn.addEventListener("input", () => {
+      const v = secIn.value.trim();
+      if (def.custom) def.custom.secs = v; else if (v) S.secs[def.id] = v; else delete S.secs[def.id];
+      save(); paint();
+    });
+    if (def.custom) {
+      const nIn = el.querySelector(".name-input");
+      nIn.id = "name-" + def.id; nIn.value = def.custom.name;
+      nIn.addEventListener("input", () => {
+        def.custom.name = nIn.value; def.name = nIn.value;
+        el.querySelector(".name").textContent = nIn.value || "自訂"; save();
+      });
+      el.querySelector(".del").addEventListener("click", e => {
+        e.stopPropagation();
+        S.custom = S.custom.filter(c => c !== def.custom);
+        delete S.run[def.id]; save(); build();
+      });
+    }
+    bindPress(el, def);
+    grid.appendChild(el);
+    refs.push({
+      el, def, val: el.querySelector(".val"), sub: el.querySelector(".sub"),
+      prog: el.querySelector(".prog"),
+    });
+  });
+  if (S.showPlayer) {
+    const add = document.createElement("button");
+    add.className = "card add"; add.textContent = "＋ 新增自訂卡";
+    add.addEventListener("click", addCustom);
+    grid.appendChild(add);
+  }
+  fit(); paint();
+}
+
+function paint() {
+  const now = Date.now();
+  refs.forEach(r => {
+    const { def, val, sub, prog, el } = r;
+    if (def.counter) {
+      const mx = secsOf(def), n = S.counts[def.id] || 0, done = n >= mx;
+      val.className = "val count"; val.textContent = n + "/" + mx;
+      val.style.color = done ? "var(--ready)" : "";
+      prog.setAttribute("stroke-dasharray", (mx ? n / mx * 100 : 0) + " 100");
+      prog.style.stroke = done ? "var(--ready)" : "var(--player)";
+      el.classList.toggle("done", done);
+      sub.textContent = "點一下 +1 · 長按歸零";
+      return;
+    }
+    const run = S.run[def.id];
+    if (run) {
+      const left = Math.max(0, (run.end - now) / 1000), frac = left / run.total;
+      const col = frac < 0.4 ? "var(--cool-b)" : "var(--cool-a)";
+      val.className = "val"; val.textContent = Math.ceil(left); val.style.color = col;
+      prog.style.stroke = col;
+      prog.setAttribute("stroke-dasharray", (frac * 100).toFixed(2) + " 100");
+      sub.textContent = run.total + " 秒";
+    } else {
+      val.className = "val ready"; val.textContent = "READY"; val.style.color = "";
+      prog.style.stroke = ""; prog.setAttribute("stroke-dasharray", "100 100");
+      const s = secsOf(def);
+      sub.textContent = s > 0 ? s + " 秒" : "未設定秒數";
+    }
+  });
+}
+
+// 依卡片數量與可用空間，挑出讓卡片最大、又不必捲動的欄列數
+function fit() {
+  const items = [...grid.children].filter(n => getComputedStyle(n).display !== "none");
+  const n = items.length; if (!n) return;
+  const W = grid.clientWidth, H = grid.clientHeight, g = 8, ASPECT = 1.15;
+  let best = null;
+  for (let c = 1; c <= n; c++) {
+    const r = Math.ceil(n / c);
+    const cw = (W - (c - 1) * g) / c, ch = (H - (r - 1) * g) / r;
+    if (cw <= 0 || ch <= 0) continue;
+    const s = Math.min(cw, ch / ASPECT);
+    if (!best || s > best.s + 0.5) best = { c, r, cw, ch, s };
+  }
+  if (!best) return;
+  const colW = Math.min(best.cw, 240), rowH = Math.min(best.ch, 260);
+  grid.style.gridTemplateColumns = `repeat(${best.c}, ${Math.floor(colW)}px)`;
+  grid.style.gridTemplateRows = `repeat(${best.r}, ${Math.floor(rowH)}px)`;
+}
+new ResizeObserver(() => fit()).observe(grid);
+
+// ===== 點擊：計時卡 單擊開始、快速點兩下重新倒數；計次卡 單擊 +1、長按歸零 =====
+const DOUBLE_MS = 350;
+function bindPress(el, def) {
+  let down = false, timer = null, fired = false, sx = 0, sy = 0, lastTap = 0;
+  const editing = () => document.body.classList.contains("editing");
+  el.addEventListener("pointerdown", e => {
+    if (editing() || e.button > 0) return;
+    unlockVoice();
+    down = true; fired = false; sx = e.clientX; sy = e.clientY;
+    el.classList.add("press");
+    if (def.counter)
+      timer = setTimeout(() => { fired = true; down = false; el.classList.remove("press"); start(def, true); }, LONG_MS);
+  });
+  const cancel = () => { down = false; clearTimeout(timer); timer = null; el.classList.remove("press"); };
+  el.addEventListener("pointermove", e => { if (down && Math.hypot(e.clientX - sx, e.clientY - sy) > 12) cancel(); });
+  el.addEventListener("pointerleave", cancel);
+  el.addEventListener("pointercancel", cancel);
+  el.addEventListener("pointerup", () => {
+    if (!down) return;
+    cancel();
+    if (def.counter) { if (!fired) start(def, false); return; }
+    const now = Date.now();
+    if (now - lastTap < DOUBLE_MS) { lastTap = 0; start(def, true); }   // 第二下：重新倒數
+    else { lastTap = now; start(def, false); }                         // 第一下：READY 時開始
+  });
+  el.addEventListener("contextmenu", e => e.preventDefault());
+  el.addEventListener("keydown", e => {
+    if (editing() || (e.key !== "Enter" && e.key !== " ")) return;
+    e.preventDefault(); start(def, e.shiftKey);
+  });
+}
+
+// ===== 計時迴圈（以結束時間計算，鎖屏或切走回來秒數仍正確） =====
+setInterval(() => {
+  const now = Date.now(); let ended = [];
+  for (const id in S.run) if (S.run[id].end <= now) { ended.push(id); delete S.run[id]; }
+  if (ended.length) { save(); ended.forEach(id => speak(nameOf(id) + " 好了")); buzz([60, 60, 60]); }
+  paint();
+}, 100);
+
+// ===== 語音 =====
+let voiceUnlocked = false, zhVoice = null;
+function pickVoice() {
+  if (!("speechSynthesis" in window)) return;
+  const vs = speechSynthesis.getVoices();
+  zhVoice = vs.find(v => /zh[-_]TW/i.test(v.lang)) || vs.find(v => /zh/i.test(v.lang)) || null;
+}
+if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+function speak(text, force) {
+  if ((!S.voice && !force) || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "zh-TW"; u.rate = 1.1; if (zhVoice) u.voice = zhVoice;
+  speechSynthesis.speak(u);
+}
+function unlockVoice() {           // iPhone 需要在使用者點擊當下先發聲一次
+  if (voiceUnlocked || !S.voice || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u);
+  voiceUnlocked = true;
+}
+
+// ===== 螢幕常亮 =====
+let wakeLock = null;
+async function keepAwake() {
+  if (wakeLock || !("wakeLock" in navigator)) return;
+  try { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => { wakeLock = null; }); }
+  catch (e) { /* 不支援或被瀏覽器擋下時略過 */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && Object.keys(S.run).length) keepAwake();
+});
+
+// ===== 其他 =====
+function buzz(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} }
+let toastT = null;
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove("show"), 1800);
+}
+function addCustom() {
+  const used = new Set(S.custom.map(c => c.id)); let n = 1;
+  while (used.has("c" + n)) n++;
+  S.custom.push({ id: "c" + n, name: "自訂", secs: "" }); save(); build();
+  const inp = document.getElementById("name-角色::自訂::c" + n);
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+// ===== 工具列 =====
+const bossSel = document.getElementById("boss");
+bossSel.addEventListener("change", () => { S.boss = +bossSel.value; save(); build(); });
+
+const btnPlayer = document.getElementById("btnPlayer");
+const btnVoice = document.getElementById("btnVoice");
+const btnEdit = document.getElementById("btnEdit");
+function syncChips() {
+  btnPlayer.setAttribute("aria-pressed", S.showPlayer);
+  btnVoice.setAttribute("aria-pressed", S.voice);
+}
+btnPlayer.addEventListener("click", () => { S.showPlayer = !S.showPlayer; save(); syncChips(); build(); });
+btnVoice.addEventListener("click", () => {
+  if (!("speechSynthesis" in window)) { toast("這個瀏覽器不支援語音"); return; }
+  S.voice = !S.voice; save(); syncChips();
+  if (S.voice) { voiceUnlocked = true; speak("語音提示已開啟", true); toast("倒數結束時會念出技能名稱"); }
+  else { speechSynthesis.cancel(); toast("語音提示已關閉"); }
+});
+btnEdit.addEventListener("click", () => {
+  const on = !document.body.classList.contains("editing");
+  document.body.classList.toggle("editing", on);
+  btnEdit.setAttribute("aria-pressed", on); btnEdit.textContent = on ? "完成" : "設定";
+  if (!on && document.activeElement) document.activeElement.blur();
+  requestAnimationFrame(fit);
+});
+const btnReset = document.getElementById("btnReset");
+let resetArm = null;
+btnReset.addEventListener("click", () => {
+  if (resetArm) {
+    clearTimeout(resetArm); resetArm = null;
+    btnReset.classList.remove("armed"); btnReset.textContent = "全部重置";
+    resetAll(); toast("已重置所有倒數與次數"); return;
+  }
+  btnReset.classList.add("armed"); btnReset.textContent = "再按一次確認";
+  resetArm = setTimeout(() => { resetArm = null; btnReset.classList.remove("armed"); btnReset.textContent = "全部重置"; }, 2500);
+});
+document.getElementById("btnAdd").addEventListener("click", () => {
+  if (!S.showPlayer) { S.showPlayer = true; syncChips(); }
+  addCustom();
+});
+
+// ===== 啟動 =====
+syncChips();
+fetch("bosses.json", { cache: "no-cache" })
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  .then(d => {
+    CATEGORIES = d.categories || []; PLAYER_SKILLS = d.player_skills || [];
+    if (!(S.boss >= 0 && S.boss < CATEGORIES.length)) S.boss = 0;
+    CATEGORIES.forEach((c, k) => bossSel.add(new Option(c.name, k)));
+    bossSel.value = S.boss;
+    build();
+  })
+  .catch(() => {
+    grid.innerHTML = '<p class="hint">讀不到 Boss 清單（bosses.json），請重新整理頁面。</p>';
+  });
+</script>
+</body>
+</html>

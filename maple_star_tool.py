@@ -27,7 +27,7 @@
 
 拖曳說明：背景/底冊透明時，請用「⠿ 拖曳握把」移動視窗（握把永遠可見可抓）。
 
-之後修改下方 CATEGORIES 即可換成你自己的分類與技能。
+Boss 分類與技能清單在 data/bosses.json（與手機網頁版共用），修改它即可。
 安裝： pip install PySide6    執行： python 技能冷卻計時器.py
 """
 
@@ -46,51 +46,13 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushBu
 # =========================================================================
 #  ★ 設定區
 # =========================================================================
+#   Boss 分類與角色技能清單放在 data/bosses.json（桌面版與手機網頁版共用，改一處即可）：
+#     {"categories": [{"name": 分類名, "skills": [...]}, ...], "player_skills": [...]}
 #   計時技能： {"name": 名稱, "cd": 冷卻秒數}
 #   計次技能： {"name": 名稱, "type": "counter", "count": 預設次數}
-CATEGORIES = [
-    {"name": "普通/混沌炎魔", "skills": [
-        {"name": "魔法無效化", "cd": 30},
-        {"name": "物理無效化", "cd": 30},
-        {"name": "誘惑", "cd": 90},
-    ]},
-    {"name": "凡雷恩", "skills": [
-        {"name": "召喚豬魔", "type": "counter", "count": 7},
-        {"name": "反頓", "cd": 60},
-        {"name": "鎖潛", "cd": 90},
-        {"name": "傳送", "cd": 90},
-    ]},
-    {"name": "普通/混沌龍王", "skills": [
-        {"name": "魔法無效化", "cd": 40},
-        {"name": "物理無效化", "cd": 40},
-    ]},
-    {"name": "阿卡伊農", "skills": [
-        {"name": "尾段全圖殺", "cd": 70},
-        {"name": "鎖潛", "cd": 90},
-    ]},
-    {"name": "皮卡啾", "skills": [
-        {"name": "反盾", "cd": 45},
-    ]},
-    {"name": "女皇", "skills": [
-        {"name": "反盾", "cd": 80},
-        {"name": "變豬", "cd": 60},
-        {"name": "鎖潛", "cd": 90},
-        {"name": "活屍", "cd": 60},
-        {"name": "傳送", "cd": 90},
-        {"name": "米哈逸反盾", "cd": 70},
-    ]},
-    {"name": "希拉", "skills": [
-        {"name": "反頓", "cd": 80},
-    ]},
-]
-
-#   角色技能／狀態（「打Boss」模式中常駐顯示，可用 ⚔ 按鈕收合；標題為藍色以與 BOSS 技能區別）
+#   角色技能／狀態（「打Boss」模式中可用 ⚔ 按鈕收合；標題為藍色以與 BOSS 技能區別）
 #   劍士「魔法消除」：技能本身 CD 60 秒，但 BOSS 會抵抗 80 秒 → 實際要倒數 80 秒
 #   「藥水CD」：部分 BOSS 戰喝藥後需等待才能再喝（預設 30 秒，可在卡片上客製）
-PLAYER_SKILLS = [
-    {"name": "魔法消除", "cd": 80},
-    {"name": "藥水CD", "cd": 30},
-]
 
 #   自訂卡：玩家在「⚔ 角色」區自行新增/刪除/改名的倒數卡（存在 maple_star_config.json）
 #   第一次執行時預設給一張「自訂」卡，秒數 0（需自行填入秒數才會倒數）
@@ -139,6 +101,22 @@ def app_dir():
 def bundled_dir():
     """打包進 exe 的資料檔位置（PyInstaller 執行時的臨時解壓目錄）；未打包時同 app_dir()"""
     return getattr(sys, "_MEIPASS", None) or app_dir()
+
+
+def _load_boss_data():
+    """讀取 data/bosses.json。先找程式旁邊的（使用者可自行修改），沒有才用打包進 exe 的那份。"""
+    rel = os.path.join("data", "bosses.json")
+    for base in (app_dir(), bundled_dir()):
+        try:
+            with open(os.path.join(base, rel), encoding="utf-8") as f:
+                d = json.load(f)
+            return list(d["categories"]), list(d["player_skills"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return [{"name": "（找不到 data/bosses.json）", "skills": []}], []
+
+
+CATEGORIES, PLAYER_SKILLS = _load_boss_data()
 
 
 def _parse_exp_csv(path):

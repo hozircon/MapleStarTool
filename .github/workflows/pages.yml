@@ -1,0 +1,42 @@
+# 手機網頁版 → GitHub Pages
+# 網站內容 = web/ + data/bosses.json（與桌面版共用的 Boss 清單）
+# 第一次使用前：Settings → Pages → Build and deployment → Source 選「GitHub Actions」
+name: Deploy mobile web to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "data/bosses.json"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp -r web/. _site/
+          cp data/bosses.json _site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

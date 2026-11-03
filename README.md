@@ -15,6 +15,9 @@ https://github.com/hozircon/MapleStarTool/releases/tag/V1.5.0.0
 ![MapleStarTool.exe](docs/images/release_download.png)
 > 若你想從原始碼執行，請參考 [3. 開發相關](#3-開發相關)。
 
+**手機版**（不用安裝，手機瀏覽器直接開）：https://hozircon.github.io/MapleStarTool/
+> 說明見 [2-5. 手機網頁版](#2-5-手機網頁版)。
+
 ---
 
 ## 2. 功能介紹
@@ -146,6 +149,24 @@ Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」�
   - **方塊** 為卡片與按鈕本體的透明度，最低約 40% 以維持可讀。
 - **右下角縮放握把**：自由調整視窗大小。視窗變窄時，卡片會自動置中折排、底部工具列自動折行，內容不會被截斷。
 
+### 2-5. 手機網頁版
+
+<img src="docs/images/mobile.png" alt="手機網頁版" width="300">
+
+網址：https://hozircon.github.io/MapleStarTool/
+
+把手機放在電腦旁邊當第二個螢幕，用手指點卡片計時。只保留打 Boss 的倒數功能，Boss 清單與桌面版相同。
+
+- **一個畫面放下所有卡片**：依卡片數量與螢幕大小自動排列，打 Boss 時不必滑動（例：女皇 9 張卡在一般手機上排成 2 欄 × 5 列）。手機轉橫向也會重新排。
+- **點一下**開始倒數；**快速點兩下**重新倒數（倒數中只點一下不會重來，避免誤觸）。
+- **計次卡**：點一下 +1、長按歸零。
+- **角色**：顯示/隱藏角色卡（魔法消除、藥水CD、自訂卡）。
+- **語音**：開啟後，倒數結束會念出「技能名稱 好了」（Android 另會震動）。iPhone 請先按一次「語音」，聽到「語音提示已開啟」即可。
+- **設定**：修改每張卡的秒數（留空＝預設）、新增/改名/刪除自訂卡、全部重置（需按兩次確認）。
+- 倒數開始時會讓螢幕保持常亮（需瀏覽器支援）；請讓網頁停在前景，鎖屏或切到其他 App 時語音不會播放。
+- 設定與倒數狀態存在手機瀏覽器內，重新整理也會保留。
+- 手機版沒有按鍵配置、血量刻度表、巡迴計時與練功計算。
+
 ---
 
 ## 3. 開發相關
@@ -186,7 +207,7 @@ python maple_star_tool.py
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconsole --onefile --name MapleStarTool maple_star_tool.py
+pyinstaller --noconsole --onefile --name MapleStarTool --add-data "data/bosses.json;data" --add-data "經驗需求表(推測).csv;." maple_star_tool.py
 ```
 
 完成後執行檔位於 `dist/MapleStarTool.exe`。
@@ -194,31 +215,47 @@ pyinstaller --noconsole --onefile --name MapleStarTool maple_star_tool.py
 
 ### 設定分類與技能
 
-所有 Boss 分類與技能都集中在 `maple_star_tool.py` 最上方的 **`CATEGORIES`**，修改這裡即可，不需改動其他程式碼；下拉選單會自動更新。
+所有 Boss 分類、技能與內建角色卡都集中在 **`data/bosses.json`**，桌面版與手機網頁版共用，修改這一個檔案即可，下拉選單會自動更新。推送到 `main` 後手機版會自動重新部署。
 
-```python
-CATEGORIES = [
+```json
+{
+  "categories": [
     {"name": "普通/混沌炎魔", "skills": [
-        {"name": "魔法無效化", "cd": 30},          # 計時技能：cd = 冷卻秒數
-        {"name": "物理無效化", "cd": 30},
+      {"name": "魔法無效化", "cd": 30},
+      {"name": "物理無效化", "cd": 30}
     ]},
     {"name": "凡雷恩", "skills": [
-        {"name": "召喚豬魔", "type": "counter", "count": 7},  # 計次技能
-        {"name": "反頓", "cd": 60},
-    ]},
-]
+      {"name": "召喚豬魔", "type": "counter", "count": 7},
+      {"name": "反頓", "cd": 60}
+    ]}
+  ],
+  "player_skills": [
+    {"name": "魔法消除", "cd": 80},
+    {"name": "藥水CD", "cd": 30}
+  ]
+}
 ```
 
 - **計時技能**：`{"name": "技能名", "cd": 冷卻秒數}`
 - **計次技能**：`{"name": "技能名", "type": "counter", "count": 目標次數}`
 
-其他常用參數（在檔案上方）：`CARD_W, CARD_H`（卡片預設尺寸）、各項配色常數。
+- **角色卡**：`player_skills`，格式同計時技能。
+
+exe 會優先讀取放在 exe 旁邊的 `data/bosses.json`，沒有才用打包在 exe 裡的那份，因此使用者也能自行修改清單。
+
+其他常用參數（在 `maple_star_tool.py` 上方）：`CARD_W, CARD_H`（卡片預設尺寸）、各項配色常數。
 
 ### 專案結構
 
 ```
 .
-├─ maple_star_tool.py     # 主程式（單一檔案）
+├─ maple_star_tool.py     # 主程式（桌面版，單一檔案）
+├─ data/
+│  └─ bosses.json         # Boss 分類與技能清單（桌面版、手機版共用）
+├─ web/
+│  └─ index.html          # 手機網頁版（GitHub Pages）
+├─ .github/workflows/
+│  └─ pages.yml           # 推送後自動部署手機版
 ├─ requirements.txt       # 相依套件
 ├─ README.md
 ├─ LICENSE
