@@ -7,7 +7,7 @@
 ## [Unreleased]
 
 ### 新增
-- **手機網頁版**（`web/index.html`，部署於 GitHub Pages：https://hozircon.github.io/MapleStarTool/）：手機放在電腦旁當第二個螢幕，用手指點卡片計時。所有卡片依數量與螢幕大小自動排列在一個畫面內，打 Boss 時不必滑動；點一下開始、快速點兩下重新倒數，計次卡長按歸零；支援角色卡與自訂卡、秒數客製、語音提示（倒數結束念出「技能名稱 好了」）、螢幕常亮，設定與倒數狀態存在手機瀏覽器內。
+- **手機網頁版**（`web/index.html`，部署於 GitHub Pages：https://hozircon.github.io/MapleStarTool/）：手機放在電腦旁當第二個螢幕，用手指點卡片計時。所有卡片依數量與螢幕大小自動排列在一個畫面內，打 Boss 時不必滑動；點一下開始、快速點兩下重新倒數，計次卡長按歸零；支援角色卡與自訂卡、秒數客製、語音提示（念出卡片名稱，語速加快；可設定「語音提前」秒數，>0 為剩該秒數時念、0 為倒數結束時念）、螢幕常亮，設定與倒數狀態存在手機瀏覽器內。
 - GitHub Actions 自動部署（`.github/workflows/pages.yml`）：`web/` 或 `data/bosses.json` 有變更並推送到 `main` 時自動更新手機版。
 
 ### 改善

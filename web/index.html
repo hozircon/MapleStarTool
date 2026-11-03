@@ -77,7 +77,12 @@ select {
 .chip.edit[aria-pressed="true"] { background: var(--ink); color: var(--ground); }
 .chip:focus-visible, select:focus-visible, .card:focus-visible, input:focus-visible { outline: 2px solid var(--ready); outline-offset: 2px; }
 
-.editbar { display: none; gap: 6px; align-items: center; }
+.editbar { display: none; gap: 6px; align-items: center; flex-wrap: wrap; }
+.editbar .lead { display: flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 700; color: var(--ink); white-space: nowrap; }
+.editbar .lead input {
+  width: 48px; height: 38px; border-radius: 10px; background: var(--card); color: var(--ink);
+  border: 1px solid var(--line); font: 700 17px var(--f-num); text-align: center; font-variant-numeric: tabular-nums;
+}
 .editing .editbar { display: flex; }
 .editbar .chip { height: 38px; color: var(--ink); }
 .editbar .chip.danger { color: var(--cool-b); }
@@ -177,13 +182,15 @@ select {
   <div class="bar">
     <div class="select-wrap"><select id="boss" aria-label="選擇 Boss"></select></div>
     <button class="chip" id="btnPlayer" aria-pressed="true" title="顯示/隱藏角色卡">角色</button>
-    <button class="chip" id="btnVoice" aria-pressed="false" title="倒數結束時念出技能名稱">語音</button>
+    <button class="chip" id="btnVoice" aria-pressed="false" title="倒數結束（或提前幾秒）念出技能名稱">語音</button>
     <button class="chip edit" id="btnEdit" aria-pressed="false">設定</button>
   </div>
   <div class="editbar">
     <button class="chip" id="btnAdd">＋ 自訂卡</button>
     <button class="chip danger" id="btnReset">全部重置</button>
-    <div class="note">秒數留空＝用預設<br>設定會存在這支手機</div>
+    <label class="lead" for="voiceLead">語音提前
+      <input id="voiceLead" inputmode="numeric" maxlength="3" placeholder="0" aria-describedby="leadNote"> 秒</label>
+    <div class="note" id="leadNote">0＝倒數結束時念<br>卡片秒數留空＝預設</div>
   </div>
   <div class="grid" id="grid"></div>
   <div class="hint"><b>點一下</b>開始倒數　·　<b>快速點兩下</b>重新倒數</div>
@@ -199,6 +206,7 @@ const STORE_KEY = "mapleStarMobile.v1";
 // ===== 狀態（存在 localStorage） =====
 const S = Object.assign({
   boss: 0, showPlayer: true, voice: false,
+  voiceLead: "",                                   // 語音提前秒數：>0 剩這麼多秒時念；0/空 倒數結束時念
   secs: {},                                        // 卡片id → 自訂秒數/次數（字串，空＝預設）
   custom: [{ id: "c1", name: "自訂", secs: "" }],   // 自訂卡
   run: {},                                         // 卡片id → { end: 結束時間(ms), total: 秒 }
@@ -244,7 +252,9 @@ function start(def, force) {
   if (S.run[def.id] && !force) { buzz(8); return; }       // 倒數中單擊：不動作
   const secs = secsOf(def);
   if (!(secs > 0)) { toast("先到「設定」填入秒數"); return; }
-  S.run[def.id] = { end: Date.now() + secs * 1000, total: secs };
+  const lead = leadSecs();
+  // said：提前語音是否已念過；卡片秒數本身不超過提前秒數時就不念（剛按下就念沒有意義）
+  S.run[def.id] = { end: Date.now() + secs * 1000, total: secs, said: lead > 0 && secs <= lead };
   buzz(force ? 40 : 15); save(); keepAwake(); paint();
 }
 function resetAll() { S.run = {}; S.counts = {}; save(); paint(); }
@@ -399,11 +409,19 @@ function bindPress(el, def) {
 
 // ===== 計時迴圈（以結束時間計算，鎖屏或切走回來秒數仍正確） =====
 setInterval(() => {
-  const now = Date.now(); let ended = [];
-  for (const id in S.run) if (S.run[id].end <= now) { ended.push(id); delete S.run[id]; }
-  if (ended.length) { save(); ended.forEach(id => speak(nameOf(id) + " 好了")); buzz([60, 60, 60]); }
+  const now = Date.now(), lead = leadSecs(), ended = [], say = [];
+  for (const id in S.run) {
+    const r = S.run[id];
+    if (lead > 0 && !r.said && (r.end - now) / 1000 <= lead) { r.said = true; say.push(id); }
+    if (r.end <= now) { ended.push(id); delete S.run[id]; }
+  }
+  if (lead === 0) say.push(...ended);
+  if (say.length || ended.length) save();
+  say.forEach(id => speak(nameOf(id)));          // 只念卡片名稱
+  if (ended.length) buzz([60, 60, 60]);
   paint();
 }, 100);
+function leadSecs() { const n = parseFloat(S.voiceLead); return n > 0 ? n : 0; }
 
 // ===== 語音 =====
 let voiceUnlocked = false, zhVoice = null;
@@ -416,7 +434,7 @@ if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged 
 function speak(text, force) {
   if ((!S.voice && !force) || !("speechSynthesis" in window)) return;
   const u = new SpeechSynthesisUtterance(text);
-  u.lang = "zh-TW"; u.rate = 1.1; if (zhVoice) u.voice = zhVoice;
+  u.lang = "zh-TW"; u.rate = 1.5; if (zhVoice) u.voice = zhVoice;
   speechSynthesis.speak(u);
 }
 function unlockVoice() {           // iPhone 需要在使用者點擊當下先發聲一次
@@ -467,7 +485,11 @@ btnPlayer.addEventListener("click", () => { S.showPlayer = !S.showPlayer; save()
 btnVoice.addEventListener("click", () => {
   if (!("speechSynthesis" in window)) { toast("這個瀏覽器不支援語音"); return; }
   S.voice = !S.voice; save(); syncChips();
-  if (S.voice) { voiceUnlocked = true; speak("語音提示已開啟", true); toast("倒數結束時會念出技能名稱"); }
+  if (S.voice) {
+    voiceUnlocked = true; speak("語音提示已開啟", true);
+    const lead = leadSecs();
+    toast(lead > 0 ? `剩 ${lead} 秒時會念出技能名稱` : "倒數結束時會念出技能名稱");
+  }
   else { speechSynthesis.cancel(); toast("語音提示已關閉"); }
 });
 btnEdit.addEventListener("click", () => {
@@ -492,6 +514,9 @@ document.getElementById("btnAdd").addEventListener("click", () => {
   if (!S.showPlayer) { S.showPlayer = true; syncChips(); }
   addCustom();
 });
+const leadIn = document.getElementById("voiceLead");
+leadIn.value = S.voiceLead || "";
+leadIn.addEventListener("input", () => { S.voiceLead = leadIn.value.trim(); save(); });
 
 // ===== 啟動 =====
 syncChips();
