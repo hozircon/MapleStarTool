@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.5.0.0
+楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.5.1.0
 
 主視窗工具：
   A. 技能冷卻計時器
@@ -24,6 +24,7 @@
      • 像直尺：0–100%，每10%大刻度(標數字)、每5%中刻度、每2.5%小刻度；刻度可標記顏色
      • 極簡：左上「拖曳握把」+ 右上「✕」；透明度/顏色/清除在主視窗設定
      • 底冊透明度可調 → 拖到 Boss 血條上對齊看攻略進度
+     • 位置/寬度、標記、刻度色、底色透明度存到 maple_star_config.json，重啟後保留
 
 拖曳說明：背景/底冊透明時，請用「⠿ 拖曳握把」移動視窗（握把永遠可見可抓）。
 
@@ -793,6 +794,7 @@ class CounterCard(QFrame):
 class RulerWidget(QWidget):
     MARGIN = 16; EDGE = 12; BASELINE = 20; MAJOR = 24; MID = 16; MINOR = 8
     STEPS = 40          # 0–100% 切 40 格 → 每格 2.5%
+    marks_changed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -829,7 +831,7 @@ class RulerWidget(QWidget):
             i = self._nearest_tick(x)
             if i is not None and self.BASELINE <= y <= self.BASELINE + self.MAJOR + 2:
                 self.marked.discard(i) if i in self.marked else self.marked.add(i)
-                self.update(); return
+                self.update(); self.marks_changed.emit(); return
             self._mode = "move"; self.setCursor(Qt.ClosedHandCursor)
         self._start_g = e.globalPosition().toPoint()
         self._start_win = win.pos(); self._start_w = win.width(); self._start_x = win.x()
@@ -897,6 +899,7 @@ class RulerWidget(QWidget):
 
 class RulerWindow(QWidget):
     closed = Signal()
+    geometry_changed = Signal()     # 移動/拉寬停下後發出（用來記憶位置）
 
     def __init__(self, base_alpha=138, hi_color=None):
         super().__init__()
@@ -916,11 +919,23 @@ class RulerWindow(QWidget):
         if hi_color is not None:
             self.ruler.hi_color = hi_color
         v.addWidget(self.ruler)
+        self._geo_timer = QTimer(self); self._geo_timer.setSingleShot(True)
+        self._geo_timer.setInterval(400); self._geo_timer.timeout.connect(self.geometry_changed)
         self.setStyleSheet("""
             #rClose { background: rgba(48,52,66,240); color:#dfe3ea; border:none;
                       border-radius:6px; font-size:12px; }
             #rClose:hover { background:#ff5757; color:white; }
         """)
+
+    def moveEvent(self, e):
+        super().moveEvent(e)
+        if self.isVisible():
+            self._geo_timer.start()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if self.isVisible():
+            self._geo_timer.start()
 
     def closeEvent(self, e):
         self.closed.emit(); super().closeEvent(e)
@@ -1080,6 +1095,12 @@ class TimerWindow(QWidget):
 
         # 設定檔與按鍵綁定：{卡片id: {"vk": 虛擬鍵碼, "force": ⚡開關}}
         self.cfg = load_config()
+        rb = self.cfg.get("ruler_base")
+        if isinstance(rb, int) and 0 <= rb <= 100:
+            self.ruler_base_val = rb
+        rc = QColor(self.cfg.get("ruler_color") or "")
+        if rc.isValid():
+            self.ruler_hi_color = rc
         self.hotkeys = {}
         for k, v in (self.cfg.get("hotkeys") or {}).items():
             if not isinstance(k, str):
@@ -1537,12 +1558,19 @@ class TimerWindow(QWidget):
             if self.ruler_window is None:
                 self.ruler_window = RulerWindow(self._ralpha(), QColor(self.ruler_hi_color))
                 self.ruler_window.closed.connect(lambda: self.ruler_btn.setChecked(False))
+                self.ruler_window.geometry_changed.connect(self._save_ruler_geometry)
+                self.ruler_window.ruler.marked = self._saved_ruler_marks()
+                self.ruler_window.ruler.marks_changed.connect(self._save_ruler_marks)
             else:
                 self.ruler_window.ruler.set_base_alpha(self._ralpha())
                 self.ruler_window.ruler.hi_color = QColor(self.ruler_hi_color)
             self._sync_panels()   # 先讓設定列出現、主視窗長高
-            # 再放到「長高後」主視窗的下方，避免遮到透明度那一排
-            self.ruler_window.move(self.x(), self.y() + self.height() + 16)
+            saved = self._saved_ruler_geometry()
+            if saved is not None:                         # 上次拉好的位置/寬度
+                self.ruler_window.setGeometry(saved)
+            else:
+                # 再放到「長高後」主視窗的下方，避免遮到透明度那一排
+                self.ruler_window.move(self.x(), self.y() + self.height() + 16)
             self.ruler_window.show(); self.ruler_window.raise_()
             keep_logical_size(self.ruler_window)
         else:
@@ -1550,21 +1578,55 @@ class TimerWindow(QWidget):
                 self.ruler_window.hide()
             self._sync_panels()
 
+    def _saved_ruler_geometry(self):
+        g = self.cfg.get("ruler_geometry")
+        if not (isinstance(g, list) and len(g) == 4 and all(isinstance(n, int) for n in g)):
+            return None
+        rect = QRect(g[0], g[1], max(240, g[2]), max(60, g[3]))
+        # 螢幕配置變了（例如拔掉副螢幕）導致位置跑到畫面外 → 改用預設位置
+        if QApplication.screenAt(rect.center()) is None:
+            return None
+        return rect
+
+    def _saved_ruler_marks(self):
+        m = self.cfg.get("ruler_marks")
+        if not isinstance(m, list):
+            return set()
+        return {i for i in m if isinstance(i, int) and 0 <= i <= RulerWidget.STEPS}
+
+    def _save_ruler_marks(self):
+        if self.ruler_window is not None:
+            self.cfg["ruler_marks"] = sorted(self.ruler_window.ruler.marked)
+            self._save_config()
+
+    def _save_ruler_geometry(self):
+        w = self.ruler_window
+        if w is None or not w.isVisible():
+            return
+        g = w.geometry()
+        self.cfg["ruler_geometry"] = [g.x(), g.y(), g.width(), g.height()]
+        self._save_config()
+
     def _on_rbase(self, v):
         self.ruler_base_val = v
         if self.ruler_window is not None:
             self.ruler_window.ruler.set_base_alpha(self._ralpha())
+        self.cfg["ruler_base"] = int(v)
+        self._save_config()
 
     def _on_rcolor(self):
         c = QColorDialog.getColor(self.ruler_hi_color, self, "選擇刻度表標記顏色")
         if c.isValid():
             self.ruler_hi_color = c; self._paint_rswatch()
+            self.cfg["ruler_color"] = c.name()
+            self._save_config()
             if self.ruler_window is not None:
                 self.ruler_window.ruler.hi_color = QColor(c); self.ruler_window.ruler.update()
 
     def _on_rclear(self):
         if self.ruler_window is not None:
             self.ruler_window.ruler.marked.clear(); self.ruler_window.ruler.update()
+            self._save_ruler_marks()
 
     # ---------- 行為 ----------
     def set_zoom(self, z):

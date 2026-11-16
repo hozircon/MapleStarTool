@@ -1,17 +1,17 @@
 # 楓星小工具
 
-![version](https://img.shields.io/badge/version-v1.5.0.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
+![version](https://img.shields.io/badge/version-v1.5.1.0-blue) ![license](https://img.shields.io/badge/license-MIT-green)
 
 一個輔助遊玩 **Maplestory World 楓星** 而設計的輕量桌面小工具，把打 Boss 常用的**技能冷卻計時**、**Boss 血量刻度表**與**練功經驗計算**整合在一個可透明、可置頂、可自由縮放的浮動視窗裡，方便疊在遊戲畫面上使用。
 
-以 Python + PySide6 開發。目前版本 **v1.5.0.0**。
+以 Python + PySide6 開發。目前版本 **v1.5.1.0**。
 
 ---
 
 ## 1. 下載與啟動
 
 此至此處下載 MapleStarTool.exe
-https://github.com/hozircon/MapleStarTool/releases/tag/V1.5.0.0
+https://github.com/hozircon/MapleStarTool/releases/tag/V1.5.1.0
 ![MapleStarTool.exe](docs/images/release_download.png)
 > 若你想從原始碼執行，請參考 [3. 開發相關](#3-開發相關)。
 
@@ -135,6 +135,7 @@ Boss 工具列的 **⚔ 角色** 按鈕可切換顯示「角色技能/狀態」�
 - 刻度分三種長度：**每 10%** 長刻度並標數字、**每 5%** 中刻度、**每 2.5%** 短刻度（例如 12.5%、17.5%）。
 - **點任一刻度**（含 2.5% 短刻度）→ 切換標記顏色（標出攻略要注意的 % 節點）。
 - 左上角 **⠿ 握把** 移動、右上角 **✕** 關閉。
+- **自動記憶**：刻度表的位置與長度、已標記的刻度、刻度色、底色透明度都會存在 `maple_star_config.json`，**重啟後自動載回**，不用每次重新對齊血條。（若上次的位置已不在任何螢幕上，例如拔掉副螢幕，會改放回主視窗下方。）
 
 把它拖到 Boss 血條上、對齊兩端，即可依刻度掌握攻略進度：
 
