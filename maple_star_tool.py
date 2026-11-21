@@ -24,6 +24,10 @@
      • 選擇開啟中的應用程式 → 比例(21:9/24:9/32:9/16:9/自訂) → 寬高依比例連動 → 置頂/置中/置底
      • 原理同 Sizer：SetWindowPos 調整其他程式視窗；尺寸以遊戲畫面(client)為準
 
+  E. 語音提示（Boss 列「🔊 語音」）
+     • 倒數到時念卡片名稱，邏輯同手機版（提前 N 秒 / 0＝結束時念）；背景依序念、不疊音
+     • Windows 內建語音（SAPI5 + OneCore 語音，ctypes 直接呼叫，不需額外套件）
+
 獨立浮動視窗：
   B. 尺規（頁籤右側「📏 尺規」開關鈕彈出，與主視窗共存、永遠置頂）
      • 像直尺：0–100%，每10%大刻度(標數字)、每5%中刻度、每2.5%小刻度；刻度可標記顏色
@@ -42,6 +46,7 @@ import os
 import time
 import json
 import threading
+import queue
 from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal, QObject, QEvent
 from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient,
                            QIntValidator)
@@ -475,8 +480,11 @@ def _place_close_btn(card):
 
 
 class RingCard(QFrame):
+    VOICE_LEAD = 0.0    # 語音提前秒數（主視窗設定）：>0 剩這麼多秒時念；0 倒數結束時念
+
     def __init__(self, name, cd, editable=False):
         super().__init__()
+        self.said = False   # 這輪倒數的提前語音是否已念過
         self.editable = editable; self.del_btn = None; self.close_btn = None
         self.closed = False
         self.default_cd = float(cd); self.total = float(cd)
@@ -577,6 +585,7 @@ class RingCard(QFrame):
             return
         self.total = secs; self.remaining = secs
         self._deadline = time.perf_counter() + secs
+        self._arm_voice(secs)
         self.active = True; self.update()
 
     def restart(self):
@@ -586,10 +595,19 @@ class RingCard(QFrame):
             return
         self.total = secs; self.remaining = secs
         self._deadline = time.perf_counter() + secs
+        self._arm_voice(secs)
         self.active = True; self.update()
 
     def reset(self):
         self.active = False; self.remaining = 0.0; self._deadline = 0.0; self.update()
+
+    def _arm_voice(self, secs):
+        # 卡片秒數本身不超過提前秒數就不念（剛按下就念沒有意義）
+        lead = RingCard.VOICE_LEAD
+        self.said = lead > 0 and secs <= lead
+
+    def voice_text(self):
+        return self.name_lbl.text().strip()
 
     def hotkey_activate(self):
         """全域按鍵觸發。⚡開：隨時重新倒數；⚡關（預設）：READY 時才開始倒數。
@@ -604,22 +622,31 @@ class RingCard(QFrame):
             self.trigger()
 
     def tick(self, dt):
+        """更新倒數；回傳 True 代表這一刻該念出卡片名稱（語音提示）"""
         if not self.active:
-            return
+            return False
+        lead = RingCard.VOICE_LEAD
+        announce = False
         self.remaining = max(0.0, self._deadline - time.perf_counter())
+        if lead > 0 and not self.said and self.remaining <= lead:
+            self.said = True; announce = True
         if self.remaining <= 0:
+            if lead <= 0:
+                announce = True
             if self.loop:
                 secs = self._resolve_secs()
                 self.total = secs
                 if secs > 0:
                     self._deadline = time.perf_counter() + secs
                     self.remaining = secs
+                    self._arm_voice(secs)
                     self.active = True
                 else:
                     self.remaining = 0.0; self.active = False; self._deadline = 0.0
             else:
                 self.remaining = 0.0; self.active = False; self._deadline = 0.0
         self.update()
+        return announce
 
     def enterEvent(self, e): self._hover = True;  self.update()
     def leaveEvent(self, e): self._hover = False; self.update()
@@ -769,7 +796,7 @@ class CounterCard(QFrame):
         self.increment()
 
     def tick(self, dt):
-        pass  # 計數卡不倒數
+        return False  # 計數卡不倒數
 
     def enterEvent(self, e): self._hover = True;  self.update()
     def leaveEvent(self, e): self._hover = False; self.update()
@@ -1272,6 +1299,169 @@ class WinAdjustPanel(QFrame):
 
 
 # =========================================================================
+#  E. 語音提示（Windows 內建語音 SAPI5，以 ctypes 直接呼叫 COM，不需額外套件）
+#  也能使用 Win10/11 較自然的 OneCore 語音（Yating、Zhiwei…）：
+#  把 Speech_OneCore 底下的語音 token 直接指定給 SAPI5 的 SpVoice。
+# =========================================================================
+VOICE_RATE_DEFAULT = 4      # SAPI 語速 -10~10；4 ≈ 1.5 倍速（同手機版）
+VOICE_STALE_SECS = 5.0      # 排隊超過這麼久還沒念到的提示直接略過（已經過時）
+
+
+def list_voices():
+    """已安裝的語音 → [(token 路徑, 顯示名稱, 語系 LCID)]；有中文語音時只列中文，繁中優先"""
+    if not IS_WINDOWS:
+        return []
+    import winreg
+    out = []
+    for sub, tag in ((r"SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens", ""),
+                     (r"SOFTWARE\Microsoft\Speech\Voices\Tokens", "")):
+        try:
+            root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, sub)
+        except OSError:
+            continue
+        i = 0
+        while True:
+            try:
+                name = winreg.EnumKey(root, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                k = winreg.OpenKey(root, name)
+                disp = str(winreg.QueryValueEx(k, "")[0])
+                lang = str(winreg.QueryValueEx(winreg.OpenKey(k, "Attributes"), "Language")[0])
+            except OSError:
+                continue
+            lcid = lang.split(";")[0].strip().lower()
+            short = disp.split(" - ")[0].replace("Microsoft ", "").strip() or name
+            out.append(("HKEY_LOCAL_MACHINE\\" + sub + "\\" + name, short, lcid))
+    zh = [v for v in out if v[2] in ("404", "804", "c04", "1004", "1404")]
+    if zh:
+        out = zh
+    order = {"404": 0, "c04": 1, "1404": 1, "804": 2, "1004": 2}
+    out.sort(key=lambda v: (order.get(v[2], 9), "desktop" in v[1].lower(), v[1]))
+    return out
+
+
+def default_voice(voices):
+    """預設語音：Yating（較自然）→ 第一個繁中 → 第一個"""
+    for v in voices:
+        if "yating" in v[0].lower():
+            return v[0]
+    return voices[0][0] if voices else ""
+
+
+class VoiceEngine:
+    """背景執行緒依序念出文字：一次只念一句、念完才念下一句（不會疊在一起），
+    同一句還在排隊就不重複加入，排隊太久的略過。"""
+
+    def __init__(self):
+        self.ok = IS_WINDOWS
+        self._q = queue.Queue()
+        self._lock = threading.Lock()
+        self._pending = set()
+        self._gen = 0                       # stop() 時遞增：舊的排隊項目全部作廢
+        self._cancel = threading.Event()
+        self._thread = None
+
+    def _ensure(self):
+        if self.ok and self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True, name="VoiceEngine")
+            self._thread.start()
+
+    def set_voice(self, token_id):
+        self._ensure(); self._q.put(("voice", token_id))
+
+    def set_rate(self, rate):
+        self._ensure(); self._q.put(("rate", int(rate)))
+
+    def set_volume(self, vol):
+        self._ensure(); self._q.put(("volume", int(vol)))   # 0–100
+
+    def say(self, text):
+        text = (text or "").strip()
+        if not text or not self.ok:
+            return
+        self._ensure()
+        with self._lock:
+            if text in self._pending:
+                return
+            self._pending.add(text)
+            self._q.put(("say", text, time.monotonic(), self._gen))
+
+    def stop(self):
+        """清空排隊並中斷正在念的句子"""
+        with self._lock:
+            self._gen += 1
+            self._pending.clear()
+        self._cancel.set()
+
+    def _run(self):
+        import ctypes
+        from ctypes import wintypes, c_void_p, POINTER, byref, WINFUNCTYPE, HRESULT
+        ole32 = ctypes.OleDLL("ole32")
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", ctypes.c_uint32), ("b", ctypes.c_uint16), ("c", ctypes.c_uint16),
+                        ("d", ctypes.c_ubyte * 8)]
+
+        def guid(s):
+            g = GUID(); ole32.CLSIDFromString(ctypes.c_wchar_p(s), byref(g)); return g
+
+        def vcall(ptr, idx, argtypes, *args):
+            vt = ctypes.cast(ptr, POINTER(POINTER(c_void_p))).contents
+            return WINFUNCTYPE(HRESULT, c_void_p, *argtypes)(vt[idx])(ptr, *args)
+
+        def create(clsid, iid):
+            p = c_void_p()
+            ole32.CoCreateInstance(byref(guid(clsid)), None, 0x17, byref(guid(iid)), byref(p))
+            return p
+
+        try:
+            ole32.CoInitializeEx(None, 2)                                  # STA
+            voice = create("{96749377-3391-11D2-9EE3-00C04F797396}",      # SpVoice / ISpVoice
+                           "{6C44DF74-72B9-4992-A1EC-EF996E0422D4}")
+        except OSError:
+            self.ok = False
+            return
+        tokens = []                                                        # 保留參考
+        while True:
+            item = self._q.get()
+            try:
+                if item[0] == "voice":
+                    if item[1]:
+                        tok = create("{EF411752-3736-4CB4-9C8C-8EF4CCB58EFE}",  # SpObjectToken
+                                     "{14056589-E16C-11D2-BB90-00C04F8EE6C0}")
+                        vcall(tok, 15, (wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.BOOL),
+                              None, item[1], False)                        # ISpObjectToken::SetId
+                        vcall(voice, 18, (c_void_p,), tok)                 # ISpVoice::SetVoice
+                        tokens = [tok]
+                    else:
+                        vcall(voice, 18, (c_void_p,), None)                # 系統預設語音
+                elif item[0] == "rate":
+                    vcall(voice, 28, (ctypes.c_long,), max(-10, min(10, item[1])))   # SetRate
+                elif item[0] == "volume":
+                    vcall(voice, 30, (ctypes.c_ushort,), max(0, min(100, item[1])))  # SetVolume
+                elif item[0] == "say":
+                    _, text, t0, gen = item
+                    with self._lock:
+                        self._pending.discard(text)
+                        stale = gen != self._gen or time.monotonic() - t0 > VOICE_STALE_SECS
+                    if stale:
+                        continue
+                    self._cancel.clear()
+                    # SPF_ASYNC | SPF_IS_NOT_XML：非同步開念，下面輪詢「念完了沒」以便可被中斷
+                    vcall(voice, 20, (wintypes.LPCWSTR, wintypes.DWORD, c_void_p), text, 0x01 | 0x10, None)
+                    while vcall(voice, 32, (wintypes.ULONG,), 100) == 1:   # WaitUntilDone：S_FALSE＝還在念
+                        if self._cancel.is_set():
+                            vcall(voice, 20, (wintypes.LPCWSTR, wintypes.DWORD, c_void_p),
+                                  None, 0x01 | 0x02, None)                 # SPF_PURGEBEFORESPEAK：停止
+                            break
+            except OSError:
+                continue                                                   # 單句失敗不影響之後的提示
+
+
+# =========================================================================
 #  B. 尺規（極簡浮動視窗：左上握把 + 右上✕；設定在主視窗）
 # =========================================================================
 class RulerWidget(QWidget):
@@ -1567,7 +1757,34 @@ class CalcPage(QWidget):
 # =========================================================================
 #  主視窗
 # =========================================================================
+class SnapSizeGrip(QSizeGrip):
+    """右下角縮放握把。不用 Qt 內建的拖曳（Windows 上會交給系統處理、拿不到拖曳過程），
+    自己算新尺寸交給主視窗，主視窗才能做「接近卡片底部就吸住」的磁吸。"""
+
+    def __init__(self, parent, win):
+        super().__init__(parent)
+        self.win = win
+        self._start = None
+        self.setCursor(Qt.SizeFDiagCursor)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._start = (e.globalPosition().toPoint(), self.win.size())
+
+    def mouseMoveEvent(self, e):
+        if self._start is not None:
+            p0, s0 = self._start
+            d = e.globalPosition().toPoint() - p0
+            self.win.resize_from_grip(s0.width() + d.x(), s0.height() + d.y())
+
+    def mouseReleaseEvent(self, e):
+        self._start = None
+
+
 class TimerWindow(QWidget):
+    FIT_GAP = 8      # 磁吸貼齊時，卡片下方保留的留白
+    SNAP_PX = 40     # 拖到離「貼齊高度」這麼近就吸住
+
     def __init__(self):
         super().__init__()
         self.cards = []; self.flows = []; self._drag = None
@@ -1595,6 +1812,10 @@ class TimerWindow(QWidget):
                 self.hotkeys[k] = {"vk": NAME_TO_VK[v], "force": False}
         hc = self.cfg.get("hidden_cards")
         self.hidden_ids = {x for x in hc if isinstance(x, str)} if isinstance(hc, list) else set()
+        vc = self.cfg.get("voice")
+        self.voice_cfg = vc if isinstance(vc, dict) else {}
+        RingCard.VOICE_LEAD = self._voice_lead_secs(self.voice_cfg.get("lead", ""))
+        self.voice = VoiceEngine()
         self.card_by_id = {}          # hotkey_id → 卡片
         self.cat_cards = []           # 每個 Boss 分類各自的卡片清單
         self.cat_flows = []           # 每個 Boss 分類頁的流式排版（角色卡會插進目前這頁）
@@ -1612,8 +1833,11 @@ class TimerWindow(QWidget):
         default_w = min(70 + max_cards * (CARD_W + 12), 900)
         self.resize(max(560, default_w), 480)
         # 最小寬度≈2張卡片多一些（底部列會折行、不再撐寬）；最小高度足夠完整顯示練功頁
-        self.base_min_h = 450
+        self.base_min_h = 450            # 練功頁；打Boss 頁的最小高度依卡片動態計算（_refit）
         self.setMinimumSize(300, self.base_min_h)
+        self._snapped = True             # 高度目前是否吸附在卡片底部（吸住後會跟著卡片變化）
+        self._boss_h = None              # 切到練功前打Boss 頁的高度
+        self._refit_pending = False
 
         root = QVBoxLayout(self); root.setContentsMargins(0, 0, 0, 0)
         self.frame = QFrame(); self.frame.setObjectName("root"); root.addWidget(self.frame)
@@ -1622,6 +1846,7 @@ class TimerWindow(QWidget):
         outer.addLayout(self._titlebar())
         outer.addWidget(self._boss_bar())
         outer.addWidget(self._ruler_settings())
+        outer.addWidget(self._voice_settings())
         self.win_set = WinAdjustPanel(self); self.win_set.setVisible(False)
         outer.addWidget(self.win_set)
 
@@ -1659,9 +1884,14 @@ class TimerWindow(QWidget):
         self.key_listener.start()
 
         self.set_mode("boss")  # 預設：打Boss
+        if self.voice_cfg.get("on") and self.voice.ok:
+            self._voice_quiet = True             # 啟動時恢復開啟狀態，不念「已開啟」
+            self.voice_btn.setChecked(True)
+            self._voice_quiet = False
         # 縮放握把固定在視窗右下角（永遠在最右）
-        self.size_grip = QSizeGrip(self.frame); self.size_grip.setFixedSize(16, 16)
+        self.size_grip = SnapSizeGrip(self.frame, self); self.size_grip.setFixedSize(16, 16)
         self.size_grip.raise_(); self._place_grip()
+        self._schedule_refit()
 
     def _titlebar(self):
         bar = QHBoxLayout(); bar.setSpacing(6)
@@ -1719,6 +1949,11 @@ class TimerWindow(QWidget):
         self.ruler_btn.setToolTip("彈出 Boss 血量刻度浮窗（可拖到血條上）")
         self.ruler_btn.toggled.connect(self._toggle_ruler)
         h.addWidget(self.ruler_btn, 0)
+        self.voice_btn = QPushButton("🔊 語音"); self.voice_btn.setObjectName("toolTab")
+        self.voice_btn.setCheckable(True); self.voice_btn.setCursor(Qt.PointingHandCursor)
+        self.voice_btn.setToolTip("語音提示：倒數到時念出技能名稱（Windows 內建語音）")
+        self.voice_btn.toggled.connect(self._toggle_voice)
+        h.addWidget(self.voice_btn, 0)
         self.boss_bar = f
         return f
 
@@ -1752,6 +1987,62 @@ class TimerWindow(QWidget):
         self.ruler_set = f
         f.setVisible(False)
         self._paint_rswatch()
+        return f
+
+    def _voice_settings(self):
+        f = QFrame(); f.setObjectName("voiceSet")
+        flow = FlowLayout(f, margin=6, hspacing=8, vspacing=4)
+        sp = f.sizePolicy(); sp.setHeightForWidth(True); sp.setVerticalPolicy(QSizePolicy.Minimum)
+        f.setSizePolicy(sp)
+
+        lw = QWidget(); ll = QHBoxLayout(lw); ll.setContentsMargins(0, 0, 0, 0); ll.setSpacing(4)
+        ll.addWidget(self._mini("提前"))
+        self.voice_lead_in = QLineEdit(str(self.voice_cfg.get("lead", "")))
+        self.voice_lead_in.setObjectName("secInput"); self.voice_lead_in.setAlignment(Qt.AlignCenter)
+        self.voice_lead_in.setFixedSize(40, 24); self.voice_lead_in.setMaxLength(3)
+        self.voice_lead_in.setPlaceholderText("0")
+        self.voice_lead_in.setValidator(QIntValidator(0, 999, self.voice_lead_in))
+        self.voice_lead_in.setToolTip("語音提前秒數：剩這麼多秒時念出技能名稱\n0 或留空＝倒數結束時念")
+        self.voice_lead_in.textChanged.connect(self._on_voice_lead)
+        ll.addWidget(self.voice_lead_in); ll.addWidget(self._mini("秒"))
+        flow.addWidget(lw)
+
+        vw = QWidget(); vl = QHBoxLayout(vw); vl.setContentsMargins(0, 0, 0, 0); vl.setSpacing(6)
+        vl.addWidget(self._mini("聲音"))
+        self.voice_combo = QComboBox(); self.voice_combo.setObjectName("smallCombo")
+        self.voice_combo.setCursor(Qt.PointingHandCursor)
+        voices = list_voices()
+        for tid, name, _l in voices:
+            self.voice_combo.addItem(name, tid)
+        if not voices:
+            self.voice_combo.addItem("系統預設", "")
+        cur = self.voice_cfg.get("voice") or default_voice(voices)
+        self.voice_combo.setCurrentIndex(max(0, self.voice_combo.findData(cur)))
+        self.voice_combo.setToolTip("Windows 內建語音（不含 Desktop 的較新、較自然）")
+        self.voice_combo.currentIndexChanged.connect(self._on_voice_pick)
+        vl.addWidget(self.voice_combo)
+        flow.addWidget(vw)
+
+        rw = QWidget(); rl = QHBoxLayout(rw); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(6)
+        rl.addWidget(self._mini("語速"))
+        self.voice_rate = QSlider(Qt.Horizontal); self.voice_rate.setRange(-2, 10)
+        rate = self.voice_cfg.get("rate", VOICE_RATE_DEFAULT)
+        self.voice_rate.setValue(rate if isinstance(rate, int) else VOICE_RATE_DEFAULT)
+        self.voice_rate.setFixedWidth(80)
+        self.voice_rate.setToolTip("語速（預設約 1.5 倍速）")
+        self.voice_rate.valueChanged.connect(self._on_voice_rate)
+        self.voice_rate.sliderReleased.connect(lambda: self._voice_test())
+        rl.addWidget(self.voice_rate)
+        self.voice_test_btn = QPushButton("試聽"); self.voice_test_btn.setObjectName("toolPill")
+        self.voice_test_btn.setCursor(Qt.PointingHandCursor)
+        self.voice_test_btn.clicked.connect(lambda: self._voice_test())
+        rl.addWidget(self.voice_test_btn)
+        flow.addWidget(rw)
+
+        self.voice_set = f
+        f.setVisible(False)
+        if not self.voice.ok:
+            self.voice_btn.setEnabled(False); self.voice_btn.setToolTip("語音提示僅支援 Windows")
         return f
 
     def _mini(self, t):
@@ -1873,6 +2164,7 @@ class TimerWindow(QWidget):
         self.cat_cards.append(cat_list)
         self.cat_flows.append(flow)
         self.flows.append(flow); scroll.setWidget(page)
+        page.installEventFilter(self)        # 卡片增減/隱藏/縮放 → 重新計算貼齊高度
         return scroll
 
     def _bottombar(self):
@@ -1921,6 +2213,9 @@ class TimerWindow(QWidget):
 
     # ---------- 模式切換 ----------
     def set_mode(self, mode):
+        prev = getattr(self, "mode", None)
+        if prev == "boss" and mode != "boss":
+            self._boss_h = self.height()
         self.mode = mode
         is_boss = (mode == "boss")
         self.main_stack.setCurrentIndex(1 if is_boss else 0)
@@ -1929,10 +2224,18 @@ class TimerWindow(QWidget):
         for w in self._boss_only_bottom:
             w.setVisible(is_boss)
         self._sync_panels()
+        if is_boss:
+            if prev not in (None, "boss") and self._boss_h and not self._snapped:
+                self.setMinimumHeight(0)                    # 先解除練功頁的 450，再恢復原本的高度
+                self.resize(self.width(), self._boss_h)
+            self._schedule_refit()
+        else:
+            self.setMinimumHeight(self.base_min_h)          # 練功頁要完整顯示
 
     def _sync_panels(self):
         is_boss = getattr(self, "mode", "exp") == "boss"
         self._set_panel_visible(self.ruler_set, is_boss and self.ruler_btn.isChecked())
+        self._set_panel_visible(self.voice_set, is_boss and self.voice_btn.isChecked())
         self._set_panel_visible(self.win_set, self.win_btn.isChecked())
 
     def _toggle_win_adjust(self, on):
@@ -2062,13 +2365,77 @@ class TimerWindow(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._place_grip()
-        if hasattr(self, "win_btn"):     # 視窗窄時只留圖示，避免標題列擠壓到模式頁籤
-            wide = self.width() >= 430
-            self.win_btn.setText("🖥 視窗調整" if wide else "🖥")
-            name = "toolTab" if wide else "toolBtn"           # 窄：改用跟 📌 一樣的小方鈕
-            if self.win_btn.objectName() != name:
-                self.win_btn.setObjectName(name)
-                self.win_btn.style().unpolish(self.win_btn); self.win_btn.style().polish(self.win_btn)
+        if e.oldSize().width() != e.size().width():
+            self._schedule_refit()           # 寬度變了 → 卡片折行數可能變了
+        # 視窗窄時按鈕只留圖示，避免擠壓到模式頁籤 / Boss 下拉選單
+        if hasattr(self, "win_btn"):
+            self._compact_btn(self.win_btn, "🖥 視窗調整", "🖥", self.width() >= 430)
+        if hasattr(self, "voice_btn"):
+            wide = self.width() >= 600
+            for b, full, icon in ((self.player_btn, "⚔ 角色", "⚔"), (self.add_custom_btn, "＋自訂", "＋"),
+                                  (self.ruler_btn, "📏 血量刻度", "📏"), (self.voice_btn, "🔊 語音", "🔊")):
+                self._compact_btn(b, full, icon, wide)
+
+    # ---------- 高度貼齊卡片底部（磁吸） ----------
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.LayoutRequest:
+            self._schedule_refit()
+        return False
+
+    def _schedule_refit(self):
+        if not self._refit_pending:
+            self._refit_pending = True
+            QTimer.singleShot(0, self._refit)
+
+    def _fit_heights(self):
+        """(貼齊高度, 最小高度)：貼齊＝所有卡片剛好放得下＋少量留白；最小＝至少留一排卡片。
+        以目前的寬度、卡片縮放、分類與顯示中的卡片即時計算。"""
+        idx = self.boss_stack.currentIndex()
+        if not (0 <= idx < len(self.cat_flows)):
+            return None
+        scroll = self.boss_stack.currentWidget()
+        flow = self.cat_flows[idx]
+        content = flow.heightForWidth(scroll.width())
+        m = flow.contentsMargins()
+        one_row = int(CARD_H * self.zoom) + m.top() + m.bottom()
+        chrome = self.height() - scroll.height()     # 卡片區以外（標題列、設定列、底部列…）
+        return chrome + content + self.FIT_GAP, chrome + min(content, one_row) + self.FIT_GAP
+
+    def _refit(self):
+        self._refit_pending = False
+        if getattr(self, "mode", None) != "boss" or not self.isVisible():
+            return
+        hs = self._fit_heights()
+        if hs is None:
+            return
+        fit, low = hs
+        self.setMinimumHeight(low)
+        if self._snapped and self.height() != fit:
+            self.resize(self.width(), fit)
+
+    def resize_from_grip(self, w, h):
+        """縮放握把拖曳中：照滑鼠改尺寸；打Boss 頁時接近卡片底部就吸住"""
+        w = max(self.minimumWidth(), w); h = max(self.minimumHeight(), h)
+        old_h, was = self.height(), self._snapped
+        self.resize(w, h)
+        if getattr(self, "mode", None) != "boss":
+            return
+        hs = self._fit_heights()            # 用新寬度重算（折行數可能變了）
+        if hs is None:
+            return
+        fit = hs[0]
+        # 吸住中只拉寬度（高度沒拉開超過磁吸距離）→ 繼續吸住，高度跟著折行變化
+        self._snapped = abs(h - fit) <= self.SNAP_PX or (was and abs(h - old_h) <= self.SNAP_PX)
+        if self._snapped and self.height() != fit:
+            self.resize(self.width(), fit)
+
+    @staticmethod
+    def _compact_btn(btn, full, icon, wide):
+        btn.setText(full if wide else icon)
+        name = "toolTab" if wide else "toolBtn"               # 窄：改用跟 📌 一樣的小方鈕
+        if btn.objectName() != name:
+            btn.setObjectName(name)
+            btn.style().unpolish(btn); btn.style().polish(btn)
 
     # ---------- 尺規視窗 + 設定 ----------
     def _ralpha(self):
@@ -2170,8 +2537,55 @@ class TimerWindow(QWidget):
 
     def _tick(self):
         dt = TICK_MS / 1000.0
-        for c in self.cards:
-            c.tick(dt)
+        say = [c for c in self.cards if c.tick(dt)]
+        if say and self.voice_btn.isChecked():
+            for c in say:                       # 只念卡片名稱；依序排隊念，不會疊在一起
+                self.voice.say(c.voice_text())
+
+    # ---------- 語音提示 ----------
+    @staticmethod
+    def _voice_lead_secs(t):
+        try:
+            n = float(str(t).strip())
+        except ValueError:
+            return 0.0
+        return n if n > 0 else 0.0
+
+    def _voice_apply_engine(self):
+        self.voice.set_voice(self.voice_combo.currentData() or "")
+        self.voice.set_rate(self.voice_rate.value())
+
+    def _toggle_voice(self, on):
+        self.voice_cfg["on"] = bool(on)
+        if on:
+            self._voice_apply_engine()
+            lead = RingCard.VOICE_LEAD
+            if not getattr(self, "_voice_quiet", False):
+                self.voice.say("語音提示已開啟")
+            self.voice_btn.setToolTip(f"剩 {lead:g} 秒時念出技能名稱" if lead > 0 else "倒數結束時念出技能名稱")
+        else:
+            self.voice.stop()
+        self._sync_panels()
+        self._save_voice()
+
+    def _voice_test(self):
+        self.voice.stop()
+        self._voice_apply_engine()
+        self.voice.say("魔法無效化")
+
+    def _on_voice_lead(self, t):
+        RingCard.VOICE_LEAD = self._voice_lead_secs(t)
+        self.voice_cfg["lead"] = t.strip(); self._save_voice()
+
+    def _on_voice_pick(self, _i):
+        self.voice_cfg["voice"] = self.voice_combo.currentData() or ""
+        self._save_voice(); self._voice_test()
+
+    def _on_voice_rate(self, v):
+        self.voice_cfg["rate"] = int(v); self._save_voice()
+
+    def _save_voice(self):
+        self.cfg["voice"] = self.voice_cfg; self._save_config()
 
     def reset_all(self):
         for c in self.cards:
@@ -2220,7 +2634,7 @@ class TimerWindow(QWidget):
         #dim {{ color:#969caa; font-size:11px; font-family:"Microsoft JhengHei"; }}
         #vsep {{ background: rgba(255,255,255,40); }}
         #bossBar {{ background: transparent; }}
-        #rulerSet, #winSet {{ background: rgba(91,155,255,28); border:1px solid rgba(91,155,255,90); border-radius:10px; }}
+        #rulerSet, #winSet, #voiceSet {{ background: rgba(91,155,255,28); border:1px solid rgba(91,155,255,90); border-radius:10px; }}
         QLabel#skillName {{ color:rgb(241,201,74); background:transparent; }}
         QLabel#playerSkillName {{ color:#5b9bff; background:transparent; }}
         QLineEdit#customName {{ color:#5b9bff; background:transparent; border:none; padding:0;
