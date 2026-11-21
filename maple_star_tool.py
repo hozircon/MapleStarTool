@@ -6,6 +6,7 @@
   A. 技能冷卻計時器
      • 小卡片 + 流式排版（拉寬→一排；拉窄→自動折多排）
      • 卡片縮放鈕、兩段透明度(背景/方塊)、分類頁籤、↺重置、🔁巡迴、全部重置
+     • 卡片右上 ✕ 關閉卡片（存在設定檔 hidden_cards，「全部重置」恢復顯示）
      • 秒數客製：留空用預設，填數字用你填的秒數
      • ⚔ 角色卡：角色技能/狀態倒數（劍士魔法消除 80 秒、藥水CD 30 秒），
        以卡片形式插在目前分類卡片流的最前面，跟 BOSS 卡一起排列/折行
@@ -18,6 +19,10 @@
   C. 練等效率計算器（頁籤右側「📊 練等」）
      • 起始/結束經驗 + 倒數計時器 → 經驗差(含逗號)、每分鐘/每小時 效率
      • 選填「升級經驗」→ 升級總時 / 升級剩餘（精確到分鐘）
+
+  D. 視窗調整（標題列「🖥 視窗調整」）
+     • 選擇開啟中的應用程式 → 比例(21:9/24:9/32:9/16:9/自訂) → 寬高依比例連動 → 置頂/置中/置底
+     • 原理同 Sizer：SetWindowPos 調整其他程式視窗；尺寸以遊戲畫面(client)為準
 
 獨立浮動視窗：
   B. 尺規（頁籤右側「📏 尺規」開關鈕彈出，與主視窗共存、永遠置頂）
@@ -38,11 +43,12 @@ import time
 import json
 import threading
 from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal, QObject, QEvent
-from PySide6.QtGui import QColor, QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient
+from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient,
+                           QIntValidator)
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QSlider, QSizeGrip,
                                QFrame, QStackedWidget, QButtonGroup, QScrollArea, QLayout,
-                               QColorDialog, QSizePolicy, QComboBox)
+                               QColorDialog, QSizePolicy, QComboBox, QMenu)
 
 # =========================================================================
 #  ★ 設定區
@@ -424,6 +430,8 @@ class FlowLayout(QLayout):
         # 先分行
         rows = []; cur = []; cur_w = 0; cur_h = 0
         for it in self._items:
+            if it.isEmpty():            # 隱藏的卡片（例如被 ✕ 關閉）不佔位置
+                continue
             w, h = it.sizeHint().width(), it.sizeHint().height()
             add = w if not cur else self._h + w
             if cur and cur_w + add > avail:
@@ -448,10 +456,29 @@ class FlowLayout(QLayout):
 # =========================================================================
 #  A. 技能卡片
 # =========================================================================
+def _make_close_btn(card):
+    """卡片右上角的 ✕（關閉/隱藏此卡，按「全部重置」可恢復）。
+    以浮動子元件放在角落、不佔排版，名稱仍可用滿整張卡的寬度。"""
+    b = QPushButton("✕", card); b.setObjectName("cardDel")
+    b.setCursor(Qt.PointingHandCursor); b.setFocusPolicy(Qt.NoFocus)
+    b.setToolTip("關閉這張卡片（按下方「全部重置」可恢復顯示）")
+    return b
+
+
+def _place_close_btn(card):
+    b = getattr(card, "close_btn", None)
+    if b is None:
+        return
+    dh = max(14, int(16 * card.zoom)); b.setFixedSize(dh, dh)
+    fd = QFont(); fd.setPixelSize(max(8, int(10 * card.zoom))); b.setFont(fd)
+    b.move(card.width() - dh - 4, 4); b.raise_()
+
+
 class RingCard(QFrame):
     def __init__(self, name, cd, editable=False):
         super().__init__()
-        self.editable = editable; self.del_btn = None
+        self.editable = editable; self.del_btn = None; self.close_btn = None
+        self.closed = False
         self.default_cd = float(cd); self.total = float(cd)
         self.remaining = 0.0; self.active = False; self.loop = False
         self._deadline = 0.0
@@ -475,6 +502,7 @@ class RingCard(QFrame):
         else:
             self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
             self.name_lbl.setObjectName("skillName"); lay.addWidget(self.name_lbl)
+            self.close_btn = _make_close_btn(self)    # 自訂卡的 ✕ 是刪除，其他卡的 ✕ 是關閉
         lay.addStretch(1)
         row = QHBoxLayout(); row.setSpacing(4)
         self.sec_input = QLineEdit(); self.sec_input.setPlaceholderText(str(int(cd)))
@@ -523,6 +551,7 @@ class RingCard(QFrame):
         self.key_btn.setFont(fk)
         fb = QFont(); fb.setPixelSize(max(9, int(12 * z)))
         self.loop_btn.setFont(fb); self.reset_btn.setFont(fb); self.force_btn.setFont(fb)
+        _place_close_btn(self)
         self.updateGeometry(); self.update()
 
     def set_block_alpha(self, a):
@@ -598,7 +627,8 @@ class RingCard(QFrame):
     def mousePressEvent(self, e):
         if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
                                                     self.key_btn, self.force_btn,
-                                                    self.name_lbl if self.editable else None, self.del_btn):
+                                                    self.name_lbl if self.editable else None, self.del_btn,
+                                                    self.close_btn):
             return
         if e.button() == Qt.LeftButton:
             self.trigger()
@@ -606,7 +636,8 @@ class RingCard(QFrame):
     def mouseDoubleClickEvent(self, e):
         if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
                                                     self.key_btn, self.force_btn,
-                                                    self.name_lbl if self.editable else None, self.del_btn):
+                                                    self.name_lbl if self.editable else None, self.del_btn,
+                                                    self.close_btn):
             return
         if e.button() == Qt.LeftButton:
             self.restart()
@@ -657,13 +688,14 @@ class CounterCard(QFrame):
     def __init__(self, name, count):
         super().__init__()
         self.default_max = int(count)
-        self.count = 0
+        self.count = 0; self.closed = False
         self._hover = False; self.block_alpha = 240; self.zoom = 1.0
         self.hotkey_id = None; self.hotkey_vk = None; self._last_hotkey = 0.0
 
         lay = QVBoxLayout(self); lay.setContentsMargins(8, 8, 8, 8); lay.setSpacing(4)
         self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
         self.name_lbl.setObjectName("skillName"); lay.addWidget(self.name_lbl)
+        self.close_btn = _make_close_btn(self)
         lay.addStretch(1)
         row = QHBoxLayout(); row.setSpacing(4)
         self.max_input = QLineEdit(); self.max_input.setPlaceholderText(str(int(count)))
@@ -699,6 +731,7 @@ class CounterCard(QFrame):
         fk = QFont("Microsoft JhengHei"); fk.setPixelSize(max(9, int(11 * z)))
         self.key_btn.setFont(fk)
         fb = QFont(); fb.setPixelSize(max(9, int(12 * z))); self.reset_btn.setFont(fb)
+        _place_close_btn(self)
         self.updateGeometry(); self.update()
 
     def set_block_alpha(self, a):
@@ -742,14 +775,14 @@ class CounterCard(QFrame):
     def leaveEvent(self, e): self._hover = False; self.update()
 
     def mousePressEvent(self, e):
-        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn):
+        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn, self.close_btn):
             return
         if e.button() == Qt.LeftButton:
             self.increment()
 
     def mouseDoubleClickEvent(self, e):
         # 快速連點時第二下由 doubleClick 送達，這裡補計一次，確保每次點擊都算到
-        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn):
+        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn, self.close_btn):
             return
         if e.button() == Qt.LeftButton:
             self.increment()
@@ -786,6 +819,456 @@ class CounterCard(QFrame):
         f = QFont("Arial"); f.setBold(True); f.setPixelSize(max(11, int(side * 0.26)))
         p.setFont(f); p.drawText(ring, Qt.AlignCenter, f"{self.count}/{mx}")
         p.end()
+
+
+# =========================================================================
+#  D. 視窗調整（調整其他程式＝遊戲視窗的大小/位置；原理同 Sizer：SetWindowPos）
+#  座標一律是實體像素：Qt6 預設 Per-Monitor DPI Aware v2，Win32 API 回傳的就是實體像素。
+#  RECT 以 (left, top, right, bottom) tuple 表示。
+# =========================================================================
+class Win32:
+    """視窗調整用到的 Win32 函式（延遲載入；非 Windows 時 ok=False）"""
+    _inst = None
+
+    @classmethod
+    def get(cls):
+        if cls._inst is None:
+            cls._inst = cls()
+        return cls._inst
+
+    def __init__(self):
+        self.ok = IS_WINDOWS
+        if not self.ok:
+            return
+        import ctypes
+        from ctypes import wintypes
+        self.ct, self.wt = ctypes, wintypes
+        u = self.u = ctypes.WinDLL("user32", use_last_error=True)
+        k = self.k = ctypes.WinDLL("kernel32", use_last_error=True)
+        try:
+            self.dwm = ctypes.WinDLL("dwmapi")
+        except OSError:
+            self.dwm = None
+        H, R = wintypes.HWND, wintypes.RECT
+        self.ENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, H, wintypes.LPARAM)
+
+        class WINDOWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcWindow", R), ("rcClient", R),
+                        ("dwStyle", wintypes.DWORD), ("dwExStyle", wintypes.DWORD),
+                        ("dwWindowStatus", wintypes.DWORD), ("cxWindowBorders", wintypes.UINT),
+                        ("cyWindowBorders", wintypes.UINT), ("atomWindowType", wintypes.ATOM),
+                        ("wCreatorVersion", wintypes.WORD)]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", R), ("rcWork", R),
+                        ("dwFlags", wintypes.DWORD)]
+        self.WINDOWINFO, self.MONITORINFO = WINDOWINFO, MONITORINFO
+
+        u.EnumWindows.argtypes = [self.ENUMPROC, wintypes.LPARAM]
+        u.IsWindow.argtypes = [H]; u.IsWindowVisible.argtypes = [H]
+        u.IsIconic.argtypes = [H]; u.IsZoomed.argtypes = [H]
+        u.GetWindowTextLengthW.argtypes = [H]
+        u.GetWindowTextW.argtypes = [H, wintypes.LPWSTR, ctypes.c_int]
+        u.GetWindow.argtypes = [H, wintypes.UINT]; u.GetWindow.restype = H
+        u.GetWindowLongW.argtypes = [H, ctypes.c_int]; u.GetWindowLongW.restype = ctypes.c_long
+        u.GetWindowThreadProcessId.argtypes = [H, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowInfo.argtypes = [H, ctypes.POINTER(WINDOWINFO)]
+        u.MonitorFromWindow.argtypes = [H, wintypes.DWORD]; u.MonitorFromWindow.restype = wintypes.HMONITOR
+        u.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(MONITORINFO)]
+        u.ShowWindow.argtypes = [H, ctypes.c_int]
+        u.SetWindowPos.argtypes = [H, H, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   wintypes.UINT]
+        k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k.OpenProcess.restype = wintypes.HANDLE
+        k.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                 ctypes.POINTER(wintypes.DWORD)]
+        k.CloseHandle.argtypes = [wintypes.HANDLE]
+        if self.dwm is not None:
+            self.dwm.DwmGetWindowAttribute.argtypes = [H, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+
+    @staticmethod
+    def _rt(r):
+        return (r.left, r.top, r.right, r.bottom)
+
+    def title(self, hwnd):
+        n = self.u.GetWindowTextLengthW(hwnd)
+        buf = self.ct.create_unicode_buffer(n + 1)
+        self.u.GetWindowTextW(hwnd, buf, n + 1)
+        return buf.value
+
+    def exe(self, hwnd):
+        """(exe 檔名, pid)；權限不足讀不到檔名時檔名為空字串"""
+        pid = self.wt.DWORD()
+        self.u.GetWindowThreadProcessId(hwnd, self.ct.byref(pid))
+        h = self.k.OpenProcess(0x1000, False, pid.value)       # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return "", pid.value
+        try:
+            buf = self.ct.create_unicode_buffer(1024); n = self.wt.DWORD(1024)
+            if self.k.QueryFullProcessImageNameW(h, 0, buf, self.ct.byref(n)):
+                return os.path.basename(buf.value), pid.value
+            return "", pid.value
+        finally:
+            self.k.CloseHandle(h)
+
+    def _cloaked(self, hwnd):
+        """Win10/11 的「隱形」視窗（例如背景的 UWP 程式）"""
+        if self.dwm is None:
+            return False
+        v = self.wt.DWORD()
+        if self.dwm.DwmGetWindowAttribute(hwnd, 14, self.ct.byref(v), 4) != 0:   # DWMWA_CLOAKED
+            return False
+        return bool(v.value)
+
+    def list_windows(self):
+        """目前開啟中、看得到的應用程式主視窗 → [(hwnd, 標題, exe)]（不含本程式）"""
+        out, me = [], os.getpid()
+
+        def cb(hwnd, _lp):
+            if (self.u.IsWindowVisible(hwnd) and not self.u.GetWindow(hwnd, 4)      # GW_OWNER
+                    and not (self.u.GetWindowLongW(hwnd, -20) & 0x80)                # WS_EX_TOOLWINDOW
+                    and not self._cloaked(hwnd)):
+                t = self.title(hwnd)
+                if t:
+                    exe, pid = self.exe(hwnd)
+                    if pid != me:
+                        out.append((int(hwnd), t, exe))
+            return True
+        self.u.EnumWindows(self.ENUMPROC(cb), 0)
+        return out
+
+    def find(self, exe, title=""):
+        """依 exe 名稱找視窗（同 exe 有多個視窗時優先標題相同的）"""
+        if not exe:
+            return None
+        cands = [w for w in self.list_windows() if w[2].lower() == exe.lower()]
+        for w in cands:
+            if w[1] == title:
+                return w[0]
+        return cands[0][0] if cands else None
+
+    def alive(self, hwnd):
+        return bool(hwnd) and bool(self.u.IsWindow(hwnd))
+
+    def geometry(self, hwnd):
+        """(外框含隱形邊, 可見外框, 遊戲畫面 client) 三個 RECT（螢幕座標）"""
+        wi = self.WINDOWINFO(); wi.cbSize = self.ct.sizeof(wi)
+        if not self.u.GetWindowInfo(hwnd, self.ct.byref(wi)):
+            return None
+        win, client = self._rt(wi.rcWindow), self._rt(wi.rcClient)
+        vis = win
+        if self.dwm is not None:
+            r = self.wt.RECT()
+            if self.dwm.DwmGetWindowAttribute(hwnd, 9, self.ct.byref(r), self.ct.sizeof(r)) == 0:
+                vis = self._rt(r)                                  # DWMWA_EXTENDED_FRAME_BOUNDS
+        return win, vis, client
+
+    def work_area(self, hwnd):
+        """視窗所在螢幕的 (整個螢幕, 扣掉工作列的可用範圍)"""
+        mi = self.MONITORINFO(); mi.cbSize = self.ct.sizeof(mi)
+        mon = self.u.MonitorFromWindow(hwnd, 2)                    # MONITOR_DEFAULTTONEAREST
+        if not mon or not self.u.GetMonitorInfoW(mon, self.ct.byref(mi)):
+            return None
+        return self._rt(mi.rcMonitor), self._rt(mi.rcWork)
+
+    def unmaximize(self, hwnd):
+        if self.u.IsIconic(hwnd) or self.u.IsZoomed(hwnd):
+            self.u.ShowWindow(hwnd, 9)                             # SW_RESTORE
+
+    def is_zoomed(self, hwnd):
+        return bool(self.u.IsZoomed(hwnd))
+
+    def maximize(self, hwnd):
+        self.u.ShowWindow(hwnd, 3)                                 # SW_MAXIMIZE
+
+    def move(self, hwnd, x, y, w, h):
+        """回傳 Windows 錯誤碼（0＝成功；5＝權限不足，遊戲以系統管理員執行）"""
+        ok = self.u.SetWindowPos(hwnd, None, int(x), int(y), int(w), int(h),
+                                 0x0004 | 0x0010 | 0x0200)         # NOZORDER|NOACTIVATE|NOOWNERZORDER
+        return 0 if ok else (self.ct.get_last_error() or -1)
+
+
+def frame_extra(vis, client):
+    """可見外框比遊戲畫面多出的 (左, 上, 右, 下)：標題列、邊框"""
+    return (client[0] - vis[0], client[1] - vis[1], vis[2] - client[2], vis[3] - client[3])
+
+
+def plan_window(win, vis, client, work, cw, ch, pos):
+    """讓遊戲畫面（client）變成 cw×ch，水平置中，垂直依 pos（top/center/bottom）貼齊可用範圍。
+    回傳 SetWindowPos 用的 (x, y, w, h)（含 Win10/11 外框外側的隱形邊）。"""
+    el, et, er, eb = frame_extra(vis, client)
+    il, it, ir, ib = vis[0] - win[0], vis[1] - win[1], win[2] - vis[2], win[3] - vis[3]
+    vw, vh = cw + el + er, ch + et + eb
+    wl, wt, wr, wb = work
+    vx = wl + (wr - wl - vw) // 2
+    vy = {"top": wt, "center": wt + (wb - wt - vh) // 2, "bottom": wb - vh}.get(pos, wt)
+    return vx - il, vy - it, vw + il + ir, vh + it + ib
+
+
+WIN_RATIOS = [("21:9", "21:9 推薦", 21 / 9), ("24:9", "24:9 超寬", 24 / 9),
+              ("32:9", "32:9 全視野", 32 / 9), ("16:9", "16:9 標準", 16 / 9), ("free", "自訂", None)]
+WIN_POSITIONS = [("top", "置頂"), ("center", "置中"), ("bottom", "置底")]
+
+
+class WinAdjustPanel(QFrame):
+    """「視窗調整」設定列：選擇視窗 → 比例 → 寬/高（依比例連動）→ 位置 → 套用/還原"""
+
+    def __init__(self, host):
+        super().__init__()
+        self.host = host                       # TimerWindow（設定檔、存檔）
+        self.api = Win32.get()
+        self.setObjectName("winSet")
+        st = host.cfg.get("win_adjust")
+        self.st = st if isinstance(st, dict) else {}
+        self.hwnd = None
+        self._orig = {}                        # hwnd → (外框 RECT, 是否最大化)，給「還原」用
+        self._filled = False
+
+        flow = FlowLayout(self, margin=6, hspacing=8, vspacing=4)
+        sp = self.sizePolicy(); sp.setHeightForWidth(True); sp.setVerticalPolicy(QSizePolicy.Minimum)
+        self.setSizePolicy(sp)
+
+        pw = QWidget(); pl = QHBoxLayout(pw); pl.setContentsMargins(0, 0, 0, 0); pl.setSpacing(6)
+        self.pick_btn = QPushButton("選擇視窗 ▾"); self.pick_btn.setObjectName("toolPill")
+        self.pick_btn.setCursor(Qt.PointingHandCursor)
+        self.pick_btn.setToolTip("從目前開啟中的應用程式選擇要調整的視窗（例如遊戲）")
+        self.pick_btn.clicked.connect(self._pick)
+        self.target_lbl = QLabel("（未選擇）"); self.target_lbl.setObjectName("dim")
+        self.target_lbl.setMaximumWidth(170)
+        pl.addWidget(self.pick_btn); pl.addWidget(self.target_lbl)
+        flow.addWidget(pw)
+
+        rw = QWidget(); rl = QHBoxLayout(rw); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(6)
+        rl.addWidget(host._mini("比例"))
+        self.ratio_combo = QComboBox(); self.ratio_combo.setObjectName("smallCombo")
+        self.ratio_combo.setCursor(Qt.PointingHandCursor)
+        for key, label, _r in WIN_RATIOS:
+            self.ratio_combo.addItem(label, key)
+        self.ratio_combo.setCurrentIndex(max(0, self.ratio_combo.findData(self.st.get("ratio", "21:9"))))
+        self.ratio_combo.currentIndexChanged.connect(self._on_ratio)
+        rl.addWidget(self.ratio_combo)
+        flow.addWidget(rw)
+
+        sw = QWidget(); sl = QHBoxLayout(sw); sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(4)
+        self.w_in = self._num_input("遊戲畫面寬度（像素，不含標題列/邊框）")
+        self.h_in = self._num_input("遊戲畫面高度（像素，不含標題列/邊框）")
+        self.w_in.textEdited.connect(lambda _t: self._linked("w"))
+        self.h_in.textEdited.connect(lambda _t: self._linked("h"))
+        self.max_btn = QPushButton("最寬"); self.max_btn.setObjectName("toolPill")
+        self.max_btn.setCursor(Qt.PointingHandCursor)
+        self.max_btn.setToolTip("寬度填回螢幕可用的最大寬度，高度依比例計算")
+        self.max_btn.clicked.connect(self.fill_max)
+        sl.addWidget(host._mini("寬")); sl.addWidget(self.w_in)
+        sl.addWidget(host._mini("高")); sl.addWidget(self.h_in); sl.addWidget(self.max_btn)
+        flow.addWidget(sw)
+
+        ow = QWidget(); ol = QHBoxLayout(ow); ol.setContentsMargins(0, 0, 0, 0); ol.setSpacing(6)
+        ol.addWidget(host._mini("位置"))
+        self.pos_combo = QComboBox(); self.pos_combo.setObjectName("smallCombo")
+        self.pos_combo.setCursor(Qt.PointingHandCursor)
+        for key, label in WIN_POSITIONS:
+            self.pos_combo.addItem(label, key)
+        self.pos_combo.setCurrentIndex(max(0, self.pos_combo.findData(self.st.get("pos", "top"))))
+        self.pos_combo.currentIndexChanged.connect(lambda _i: self._save())
+        ol.addWidget(self.pos_combo)
+        self.apply_btn = QPushButton("套用"); self.apply_btn.setObjectName("goBtn")
+        self.apply_btn.setCursor(Qt.PointingHandCursor); self.apply_btn.clicked.connect(self.apply)
+        self.restore_btn = QPushButton("還原"); self.restore_btn.setObjectName("toolPill")
+        self.restore_btn.setCursor(Qt.PointingHandCursor)
+        self.restore_btn.setToolTip("把視窗改回套用前的大小與位置")
+        self.restore_btn.clicked.connect(self.restore); self.restore_btn.setEnabled(False)
+        ol.addWidget(self.apply_btn); ol.addWidget(self.restore_btn)
+        flow.addWidget(ow)
+
+        self.status = QLabel(""); self.status.setObjectName("dim")
+        flow.addWidget(self.status)
+
+        if not self.api.ok:
+            self.status.setText("此功能僅支援 Windows")
+            for b in (self.pick_btn, self.apply_btn, self.max_btn):
+                b.setEnabled(False)
+        elif self.st.get("exe"):                       # 上次選過的程式還開著 → 自動接上
+            self._set_target(self.api.find(self.st["exe"], self.st.get("title", "")),
+                             fill=False, quiet=True)
+
+    def _num_input(self, tip):
+        e = QLineEdit(); e.setObjectName("secInput"); e.setAlignment(Qt.AlignCenter)
+        e.setFixedSize(58, 24); e.setMaxLength(5); e.setToolTip(tip)
+        e.setValidator(QIntValidator(1, 99999, e))
+        return e
+
+    # ---------- 計算 ----------
+    def _ratio(self):
+        return WIN_RATIOS[self.ratio_combo.currentIndex()][2]
+
+    def _ref_hwnd(self):
+        """量螢幕用的視窗：已選的目標，否則用本程式所在的螢幕"""
+        if self.hwnd and self.api.alive(self.hwnd):
+            return self.hwnd
+        return int(self.host.winId())
+
+    def _limits(self):
+        """遊戲畫面在該螢幕上能用的最大 (寬, 高)：可用範圍扣掉標題列/邊框（方案 A）"""
+        if not self.api.ok:
+            return 1920, 1080
+        wa = self.api.work_area(self._ref_hwnd())
+        if wa is None:
+            return 1920, 1080
+        work = wa[1]
+        el = et = er = eb = 0
+        if self.hwnd and self.api.alive(self.hwnd) and not self.api.is_zoomed(self.hwnd):
+            g = self.api.geometry(self.hwnd)
+            if g is not None:
+                el, et, er, eb = frame_extra(g[1], g[2])
+        return work[2] - work[0] - el - er, work[3] - work[1] - et - eb
+
+    @staticmethod
+    def _val(e):
+        try:
+            return int(e.text())
+        except ValueError:
+            return 0
+
+    def _linked(self, changed):
+        """改寬→高依比例重算；改高→寬依比例重算（「自訂」比例不連動）"""
+        r = self._ratio()
+        if r is not None:
+            if changed == "w" and self._val(self.w_in) > 0:
+                self.h_in.setText(str(round(self._val(self.w_in) / r)))
+            elif changed == "h" and self._val(self.h_in) > 0:
+                self.w_in.setText(str(round(self._val(self.h_in) * r)))
+        self._hint()
+
+    def _fit(self, w, r):
+        """以寬度 w 依比例算高；超過螢幕可用高度（帶魚螢幕）就改以高度為準反推寬度"""
+        mw, mh = self._limits()
+        h = round(w / r)
+        if h > mh:
+            h, w = mh, round(mh * r)
+        return w, h
+
+    def fill_max(self):
+        """寬度＝螢幕可用的最大寬度，高度依比例"""
+        mw, mh = self._limits()
+        r = self._ratio()
+        w, h = (mw, mh) if r is None else self._fit(mw, r)
+        self.w_in.setText(str(w)); self.h_in.setText(str(h))
+        self._filled = True
+        self._hint()
+
+    def ensure_filled(self):
+        if not self._filled:
+            self.fill_max()
+
+    def _on_ratio(self, _i):
+        r = self._ratio()
+        if r is not None:
+            w = self._val(self.w_in) or self._limits()[0]
+            w, h = self._fit(w, r)
+            self.w_in.setText(str(w)); self.h_in.setText(str(h))
+        self._save(); self._hint()
+
+    def _hint(self):
+        mw, mh = self._limits()
+        if self._val(self.w_in) > mw or self._val(self.h_in) > mh:
+            self.status.setText(f"⚠ 超出螢幕可用範圍（最大 {mw}×{mh}）")
+        else:
+            self.status.setText("")
+
+    # ---------- 選擇視窗 ----------
+    def _pick(self):
+        menu = QMenu(self)
+        wins = sorted(self.api.list_windows(), key=lambda w: (w[2].lower(), w[1].lower()))
+        if not wins:
+            menu.addAction("（沒有找到可調整的視窗）").setEnabled(False)
+        for hwnd, title, exe in wins:
+            t = title if len(title) <= 40 else title[:39] + "…"
+            act = menu.addAction(f"{t}　—　{exe or '?'}")
+            act.triggered.connect(lambda _=False, h=hwnd: self._set_target(h, fill=True))
+        menu.exec(self.pick_btn.mapToGlobal(QPoint(0, self.pick_btn.height())))
+
+    def _set_target(self, hwnd, fill, quiet=False):
+        if not hwnd or not self.api.alive(hwnd):
+            if not quiet:
+                self.status.setText("找不到視窗，請重新選擇")
+            return
+        self.hwnd = hwnd
+        title, exe = self.api.title(hwnd), self.api.exe(hwnd)[0]
+        self.st["exe"], self.st["title"] = exe, title
+        short = title if len(title) <= 14 else title[:13] + "…"
+        self.target_lbl.setText(short); self.target_lbl.setToolTip(f"{title}\n{exe}")
+        self.restore_btn.setEnabled(hwnd in self._orig)
+        self._save()
+        if fill:
+            self.fill_max()
+
+    def _resolve_target(self):
+        if self.hwnd and self.api.alive(self.hwnd):
+            return self.hwnd
+        h = self.api.find(self.st.get("exe", ""), self.st.get("title", ""))   # 遊戲重開過 → 依 exe 再找
+        if h:
+            self._set_target(h, fill=False)
+        return h
+
+    # ---------- 套用 / 還原 ----------
+    def _client_size(self, hwnd):
+        g = self.api.geometry(hwnd)
+        return (g[2][2] - g[2][0], g[2][3] - g[2][1]) if g else None
+
+    @staticmethod
+    def _close_enough(size, cw, ch):
+        """未支援高 DPI 的程式在 150% 等縮放下尺寸只能以 1.5 像素為單位，差 1–2 像素視為成功"""
+        return size is not None and abs(size[0] - cw) <= 2 and abs(size[1] - ch) <= 2
+
+    def apply(self):
+        hwnd = self._resolve_target()
+        if not hwnd:
+            self.status.setText("請先「選擇視窗」"); return
+        cw, ch = self._val(self.w_in), self._val(self.h_in)
+        if cw < 100 or ch < 100:
+            self.status.setText("請輸入寬、高（至少 100）"); return
+        if hwnd not in self._orig:
+            g = self.api.geometry(hwnd)
+            if g is not None:
+                self._orig[hwnd] = (g[0], self.api.is_zoomed(hwnd))
+        self.api.unmaximize(hwnd)
+        pos = self.pos_combo.currentData()
+        err = 0
+        for _ in range(3):        # 換到不同縮放的螢幕時外框粗細會變 → 量一次、修正一次
+            g, wa = self.api.geometry(hwnd), self.api.work_area(hwnd)
+            if g is None or wa is None:
+                break
+            err = self.api.move(hwnd, *plan_window(*g, wa[1], cw, ch, pos))
+            if err or self._close_enough(self._client_size(hwnd), cw, ch):
+                break
+        self.restore_btn.setEnabled(hwnd in self._orig)
+        if err == 5:
+            self.status.setText("⚠ 權限不足：遊戲以系統管理員執行，請也用系統管理員身分開啟本工具")
+        elif err:
+            self.status.setText(f"⚠ 調整失敗（錯誤碼 {err}）")
+        else:
+            aw, ah = self._client_size(hwnd) or (cw, ch)
+            if self._close_enough((aw, ah), cw, ch):
+                self.status.setText(f"✔ 已套用 {aw}×{ah}（{self.pos_combo.currentText()}）")
+            else:
+                self.status.setText(f"⚠ 遊戲限制了尺寸：實際 {aw}×{ah}")
+
+    def restore(self):
+        hwnd = self.hwnd
+        if not (hwnd and self.api.alive(hwnd) and hwnd in self._orig):
+            self.restore_btn.setEnabled(False); return
+        rect, zoomed = self._orig.pop(hwnd)
+        err = self.api.move(hwnd, rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1])
+        if zoomed:
+            self.api.maximize(hwnd)
+        self.restore_btn.setEnabled(False)
+        self.status.setText("✔ 已還原" if not err else f"⚠ 還原失敗（錯誤碼 {err}）")
+
+    def _save(self):
+        self.st["ratio"] = self.ratio_combo.currentData()
+        self.st["pos"] = self.pos_combo.currentData()
+        self.host.cfg["win_adjust"] = self.st
+        self.host._save_config()
 
 
 # =========================================================================
@@ -1110,6 +1593,8 @@ class TimerWindow(QWidget):
                 self.hotkeys[k] = {"vk": v["vk"], "force": bool(v.get("force", False))}
             elif isinstance(v, str) and v in NAME_TO_VK:              # 舊版格式（按鍵名稱字串）
                 self.hotkeys[k] = {"vk": NAME_TO_VK[v], "force": False}
+        hc = self.cfg.get("hidden_cards")
+        self.hidden_ids = {x for x in hc if isinstance(x, str)} if isinstance(hc, list) else set()
         self.card_by_id = {}          # hotkey_id → 卡片
         self.cat_cards = []           # 每個 Boss 分類各自的卡片清單
         self.cat_flows = []           # 每個 Boss 分類頁的流式排版（角色卡會插進目前這頁）
@@ -1137,6 +1622,8 @@ class TimerWindow(QWidget):
         outer.addLayout(self._titlebar())
         outer.addWidget(self._boss_bar())
         outer.addWidget(self._ruler_settings())
+        self.win_set = WinAdjustPanel(self); self.win_set.setVisible(False)
+        outer.addWidget(self.win_set)
 
         self.main_stack = QStackedWidget(); outer.addWidget(self.main_stack, 1)
         exp_scroll = QScrollArea(); exp_scroll.setWidgetResizable(True); exp_scroll.setObjectName("scroll")
@@ -1171,7 +1658,7 @@ class TimerWindow(QWidget):
         self._rebuild_vk_map()
         self.key_listener.start()
 
-        self.set_mode("exp")   # 預設：練功經驗計算
+        self.set_mode("boss")  # 預設：打Boss
         # 縮放握把固定在視窗右下角（永遠在最右）
         self.size_grip = QSizeGrip(self.frame); self.size_grip.setFixedSize(16, 16)
         self.size_grip.raise_(); self._place_grip()
@@ -1189,7 +1676,12 @@ class TimerWindow(QWidget):
         self.boss_btn.setCheckable(True); self.boss_btn.setCursor(Qt.PointingHandCursor)
         self.boss_btn.clicked.connect(lambda: self.set_mode("boss"))
         self.mode_group.addButton(self.exp_btn); self.mode_group.addButton(self.boss_btn)
-        bar.addWidget(self.exp_btn); bar.addWidget(self.boss_btn)
+        bar.addWidget(self.boss_btn); bar.addWidget(self.exp_btn)
+        self.win_btn = QPushButton("🖥 視窗調整"); self.win_btn.setObjectName("toolTab")
+        self.win_btn.setCheckable(True); self.win_btn.setCursor(Qt.PointingHandCursor)
+        self.win_btn.setToolTip("調整遊戲視窗大小與位置（例：21:9 看到更寬的地圖）")
+        self.win_btn.toggled.connect(self._toggle_win_adjust)
+        bar.addWidget(self.win_btn)
         bar.addStretch(1)
         self.pin_btn = QPushButton("📌"); self.pin_btn.setObjectName("toolBtn")
         self.pin_btn.setCheckable(True); self.pin_btn.setChecked(True)
@@ -1362,7 +1854,7 @@ class TimerWindow(QWidget):
                 card.hide()
             else:
                 flow.insertWidget(i, card)      # 角色卡（含自訂卡）固定排在最前面
-                card.show()
+                card.setVisible(not getattr(card, "closed", False))
 
     def _category_page(self, cat):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setObjectName("scroll")
@@ -1441,6 +1933,12 @@ class TimerWindow(QWidget):
     def _sync_panels(self):
         is_boss = getattr(self, "mode", "exp") == "boss"
         self._set_panel_visible(self.ruler_set, is_boss and self.ruler_btn.isChecked())
+        self._set_panel_visible(self.win_set, self.win_btn.isChecked())
+
+    def _toggle_win_adjust(self, on):
+        if on:
+            self.win_set.ensure_filled()      # 第一次打開：寬度自動填最寬、高度依比例
+        self._sync_panels()
 
     def _set_panel_visible(self, panel, show):
         # 顯示/隱藏設定列時，讓視窗高度隨之增減，避免壓縮到卡片區
@@ -1466,6 +1964,21 @@ class TimerWindow(QWidget):
         card.key_btn.customContextMenuRequested.connect(lambda _pos, c=card: self._clear_hotkey(c))
         if getattr(card, "force_btn", None) is not None:
             card.force_btn.toggled.connect(lambda on, c=card: self._on_force_toggled(c, on))
+        if getattr(card, "close_btn", None) is not None:
+            card.close_btn.clicked.connect(lambda _=False, c=card: self._close_card(c))
+            if card.hotkey_id in self.hidden_ids:
+                card.closed = True
+                card.setVisible(False)
+
+    def _close_card(self, card):
+        """✕ 關閉卡片：停止計時並隱藏（按「全部重置」恢復）"""
+        if self._capture_card is card:
+            self._end_capture()
+        card.reset(); card.closed = True; card.setVisible(False)
+        self.hidden_ids.add(card.hotkey_id)
+        for f in self.flows:
+            f.invalidate()
+        self.cfg["hidden_cards"] = sorted(self.hidden_ids); self._save_config()
 
     def _begin_capture(self, card):
         if self._capture_card is card:      # 再點一次＝取消設定
@@ -1529,7 +2042,8 @@ class TimerWindow(QWidget):
         if isinstance(fw, (QLineEdit, QComboBox)):
             return   # 正在本程式的輸入框/下拉選單打字時不觸發
         for card in cards:
-            card.hotkey_activate()
+            if not getattr(card, "closed", False):
+                card.hotkey_activate()
 
     def _toggle_player(self, on):
         self._mount_player_cards()
@@ -1548,6 +2062,13 @@ class TimerWindow(QWidget):
     def resizeEvent(self, e):
         super().resizeEvent(e)
         self._place_grip()
+        if hasattr(self, "win_btn"):     # 視窗窄時只留圖示，避免標題列擠壓到模式頁籤
+            wide = self.width() >= 430
+            self.win_btn.setText("🖥 視窗調整" if wide else "🖥")
+            name = "toolTab" if wide else "toolBtn"           # 窄：改用跟 📌 一樣的小方鈕
+            if self.win_btn.objectName() != name:
+                self.win_btn.setObjectName(name)
+                self.win_btn.style().unpolish(self.win_btn); self.win_btn.style().polish(self.win_btn)
 
     # ---------- 尺規視窗 + 設定 ----------
     def _ralpha(self):
@@ -1655,6 +2176,17 @@ class TimerWindow(QWidget):
     def reset_all(self):
         for c in self.cards:
             c.reset()
+        if self.hidden_ids:                  # 一併恢復所有被 ✕ 關閉的卡片
+            self.hidden_ids.clear()
+            for c in self.cards:
+                if getattr(c, "closed", False):
+                    c.closed = False
+                    # 角色卡只在「⚔ 角色」開啟（已掛進分類頁）時才顯示
+                    if c not in self.player_cards or c._flow is not None:
+                        c.setVisible(True)
+            for f in self.flows:
+                f.invalidate()
+            self.cfg["hidden_cards"] = []; self._save_config()
 
     def _toggle_pin(self):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, self.pin_btn.isChecked()); self.show()
@@ -1688,7 +2220,7 @@ class TimerWindow(QWidget):
         #dim {{ color:#969caa; font-size:11px; font-family:"Microsoft JhengHei"; }}
         #vsep {{ background: rgba(255,255,255,40); }}
         #bossBar {{ background: transparent; }}
-        #rulerSet {{ background: rgba(91,155,255,28); border:1px solid rgba(91,155,255,90); border-radius:10px; }}
+        #rulerSet, #winSet {{ background: rgba(91,155,255,28); border:1px solid rgba(91,155,255,90); border-radius:10px; }}
         QLabel#skillName {{ color:rgb(241,201,74); background:transparent; }}
         QLabel#playerSkillName {{ color:#5b9bff; background:transparent; }}
         QLineEdit#customName {{ color:#5b9bff; background:transparent; border:none; padding:0;
@@ -1730,7 +2262,6 @@ class TimerWindow(QWidget):
         #tab:hover, #toolTab:hover {{ background:{ctrl_h}; color:#eef0f5; }}
         #tab:checked {{ background:{ACCENT}; color:#0c1a14; }}
         #toolTab:checked {{ background:#5b9bff; color:#04101f; }}
-
         #secInput {{ background:rgba(0,0,0,90); color:#eef0f5; border:1px solid {border};
                      border-radius:6px; padding:0 4px; }}
         #secInput:focus {{ border:1px solid {ACCENT}; }}
@@ -1740,6 +2271,14 @@ class TimerWindow(QWidget):
         #resetAll:hover {{ background:#ff5757; color:white; }}
         #toolPill:hover {{ background:{ctrl_h}; }}
 
+        #smallCombo {{ background:{ctrl}; color:#eef0f5; border:1px solid {border}; border-radius:7px;
+                padding:2px 8px; font-size:12px; font-family:"Microsoft JhengHei"; }}
+        #smallCombo::drop-down {{ border:none; width:14px; }}
+        #toolPill:disabled, #goBtn:disabled {{ color:#5d6270; }}
+        QMenu {{ background:rgb(30,33,42); color:#eef0f5; border:1px solid rgba(255,255,255,45); padding:3px; }}
+        QMenu::item {{ padding:5px 14px; }}
+        QMenu::item:selected {{ background:{ACCENT}; color:#0c1a14; }}
+        QMenu::item:disabled {{ color:#7d8494; }}
         #formLbl {{ color:#c7ccd8; font-size:13px; font-family:"Microsoft JhengHei"; }}
         #expInput, #timeInput {{ background:rgba(0,0,0,90); color:#eef0f5; border:1px solid {border};
                      border-radius:7px; padding:5px 8px; font-size:14px; }}
