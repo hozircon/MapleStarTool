@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v1.5.1.0
+楓星小工具 — Maplestory World 楓星 輔助小工具（PySide6）  v2.0.0.0
 
 主視窗工具：
   A. 技能冷卻計時器
@@ -20,10 +20,12 @@
      • 起始/結束經驗 + 倒數計時器 → 經驗差(含逗號)、每分鐘/每小時 效率
      • 選填「升級經驗」→ 升級總時 / 升級剩餘（精確到分鐘）
 
-  D. 視窗調整（標題列「🖥 視窗調整」）
+  D. 視窗調整（⚙ 設定模式的「視窗調整」設定列）
      • 選擇開啟中的應用程式 → 比例(21:9/24:9/32:9/16:9/自訂) → 寬高依比例連動 → 置頂/置中/置底
      • 原理同 Sizer：SetWindowPos 調整其他程式視窗；尺寸以遊戲畫面(client)為準
 
+  F. ⚙ 設定模式（同一視窗內切換）：卡片原地換成設定欄位（語音・提前秒數・念的內容・秒數・按鍵），
+     上方展開 語音 / 刻度表 / 視窗調整 設定列；主畫面按鈕只當開關（🔊 語音、📏 血量刻度）
   E. 語音提示（Boss 列「🔊 語音」）
      • 倒數到時念卡片名稱，邏輯同手機版（提前 N 秒 / 0＝結束時念）；背景依序念、不疊音
      • Windows 內建語音（SAPI5 + OneCore 語音，ctypes 直接呼叫，不需額外套件）
@@ -47,13 +49,15 @@ import time
 import json
 import threading
 import queue
+import math
 from PySide6.QtCore import Qt, QTimer, QRectF, QRect, QSize, QPoint, QPointF, Signal, QObject, QEvent
 from PySide6.QtGui import (QColor, QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient,
-                           QIntValidator)
+                           QIntValidator, QPalette)
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QLineEdit, QPushButton,
                                QVBoxLayout, QHBoxLayout, QGridLayout, QSlider, QSizeGrip,
                                QFrame, QStackedWidget, QButtonGroup, QScrollArea, QLayout,
-                               QColorDialog, QSizePolicy, QComboBox, QMenu)
+                               QColorDialog, QSizePolicy, QComboBox, QMenu, QDoubleSpinBox,
+                               QTabWidget, QCheckBox, QToolTip, QGraphicsOpacityEffect)
 
 # =========================================================================
 #  ★ 設定區
@@ -79,6 +83,7 @@ C_READY  = QColor(46, 230, 166)
 C_COOL_A = QColor(255, 196, 84)
 C_COOL_B = QColor(255, 87, 87)
 ACCENT   = "#2ee6a6"
+C_LOOP   = QColor(255, 226, 0)       # 巡迴卡片外框（亮黃）
 TICK_MS  = 50
 
 
@@ -471,12 +476,17 @@ def _make_close_btn(card):
 
 
 def _place_close_btn(card):
+    """擺放卡片角落的小鈕：右上 ✕、左上 🔁"""
     b = getattr(card, "close_btn", None)
-    if b is None:
-        return
-    dh = max(14, int(16 * card.zoom)); b.setFixedSize(dh, dh)
-    fd = QFont(); fd.setPixelSize(max(8, int(10 * card.zoom))); b.setFont(fd)
-    b.move(card.width() - dh - 4, 4); b.raise_()
+    if b is not None:
+        dh = max(14, int(16 * card.zoom)); b.setFixedSize(dh, dh)
+        fd = QFont(); fd.setPixelSize(max(8, int(10 * card.zoom))); b.setFont(fd)
+        b.move(card.width() - dh - 4, 4); b.raise_()
+    lb = getattr(card, "loop_btn", None)
+    if lb is not None and lb.parent() is card:
+        dl = max(16, int(19 * card.zoom)); lb.setFixedSize(dl, dl)
+        fl = QFont(); fl.setPixelSize(max(9, int(11 * card.zoom))); lb.setFont(fl)
+        lb.move(4, 4); lb.raise_()
 
 
 class RingCard(QFrame):
@@ -485,8 +495,11 @@ class RingCard(QFrame):
     def __init__(self, name, cd, editable=False):
         super().__init__()
         self.said = False   # 這輪倒數的提前語音是否已念過
+        self.voice_on = True          # 這張卡要不要念（設定頁「卡片語音」）
+        self.voice_lead_text = ""     # 這張卡的提前秒數（空＝用全域）
+        self.voice_say = ""           # 念的內容（空＝念卡片名稱）
         self.editable = editable; self.del_btn = None; self.close_btn = None
-        self.closed = False
+        self.closed = False; self.edit = False
         self.default_cd = float(cd); self.total = float(cd)
         self.remaining = 0.0; self.active = False; self.loop = False
         self._deadline = 0.0
@@ -511,19 +524,43 @@ class RingCard(QFrame):
             self.name_lbl = QLabel(name); self.name_lbl.setAlignment(Qt.AlignCenter)
             self.name_lbl.setObjectName("skillName"); lay.addWidget(self.name_lbl)
             self.close_btn = _make_close_btn(self)    # 自訂卡的 ✕ 是刪除，其他卡的 ✕ 是關閉
-        lay.addStretch(1)
+        # 設定模式時取代圓環的區塊：這張卡的語音設定
+        self.edit_box = QWidget(); eb = QVBoxLayout(self.edit_box)
+        eb.setContentsMargins(0, 0, 0, 0); eb.setSpacing(3)
+        er = QHBoxLayout(); er.setSpacing(4)
+        self.voice_chk = QCheckBox("語音"); self.voice_chk.setObjectName("cardChk")
+        self.voice_chk.setChecked(True); self.voice_chk.setCursor(Qt.PointingHandCursor)
+        self.voice_chk.setToolTip("勾選＝這張卡倒數到時要念（主畫面 🔊 語音需開啟）")
+        self.lead_in = QLineEdit(); self.lead_in.setObjectName("secInput")
+        self.lead_in.setAlignment(Qt.AlignCenter); self.lead_in.setMaxLength(3)
+        self.lead_in.setPlaceholderText("提前"); self.lead_in.setValidator(QIntValidator(0, 999, self.lead_in))
+        self.lead_in.setToolTip("這張卡的語音提前秒數\n留空＝用設定列的預設提前秒數；0＝倒數結束時念")
+        er.addWidget(self.voice_chk, 0); er.addWidget(self.lead_in, 1)
+        eb.addLayout(er)
+        self.say_in = QLineEdit(); self.say_in.setObjectName("secInput"); self.say_in.setMaxLength(20)
+        self.say_in.setAlignment(Qt.AlignCenter); self.say_in.setPlaceholderText("念的內容")
+        self.say_in.setToolTip("念的內容（留空＝念卡片名稱）\n例：「反盾」念成「反盾快好了」")
+        eb.addWidget(self.say_in)
+        self.edit_box.setVisible(False)
+        lay.addStretch(1); lay.addWidget(self.edit_box); lay.addStretch(1)
         row = QHBoxLayout(); row.setSpacing(4)
+        self.sec_lbl = QLabel("秒數"); self.sec_lbl.setObjectName("cardLbl"); self.sec_lbl.setVisible(False)
+        row.addWidget(self.sec_lbl, 0)
         self.sec_input = QLineEdit(); self.sec_input.setPlaceholderText(str(int(cd)))
         self.sec_input.setAlignment(Qt.AlignCenter); self.sec_input.setObjectName("secInput")
         self.sec_input.setToolTip("客製秒數：留空用預設，填數字用你填的秒數")
-        self.loop_btn = QPushButton("🔁"); self.loop_btn.setObjectName("loopBtn")
+        # 巡迴：卡片左上角的小鈕（浮在角落、不佔排版）；開啟時卡片外框變亮黃色
+        self.loop_btn = QPushButton("🔁", self); self.loop_btn.setObjectName("cardLoop")
         self.loop_btn.setCheckable(True); self.loop_btn.setCursor(Qt.PointingHandCursor)
-        self.loop_btn.setToolTip("巡迴計時：計時結束後自動重新開始")
-        self.loop_btn.toggled.connect(lambda on: setattr(self, "loop", on))
+        self.loop_btn.setFocusPolicy(Qt.NoFocus)
+        self.loop_btn.setToolTip("巡迴計時：計時結束後自動重新開始（開啟時卡片外框變黃色）")
+        self.loop_btn.toggled.connect(self._on_loop)
+        self._loop_fx = QGraphicsOpacityEffect(self.loop_btn); self._loop_fx.setOpacity(0.5)
+        self.loop_btn.setGraphicsEffect(self._loop_fx)            # 鈕本身一律淡淡的；巡迴狀態看外框
         self.reset_btn = QPushButton("↺"); self.reset_btn.setObjectName("resetBtn")
         self.reset_btn.setCursor(Qt.PointingHandCursor); self.reset_btn.setToolTip("重置此計時")
         self.reset_btn.clicked.connect(self.reset)
-        row.addWidget(self.sec_input, 1); row.addWidget(self.loop_btn, 0); row.addWidget(self.reset_btn, 0)
+        row.addWidget(self.sec_input, 1); row.addWidget(self.reset_btn, 0)
         lay.addLayout(row)
         row2 = QHBoxLayout(); row2.setSpacing(4)
         self.key_btn = QPushButton("按鍵配置"); self.key_btn.setObjectName("keyBtn")
@@ -544,10 +581,12 @@ class RingCard(QFrame):
     def apply_zoom(self, z):
         self.zoom = z
         self.setFixedSize(int(CARD_W * z), int(CARD_H * z))
-        ch = max(18, int(CTRL_H * z))
+        ch = max(16, int(CTRL_H * z))
         self.sec_input.setFixedHeight(ch)
-        self.loop_btn.setFixedSize(ch, ch); self.reset_btn.setFixedSize(ch, ch)
+        self.reset_btn.setFixedSize(ch, ch)
         self.key_btn.setFixedHeight(ch); self.force_btn.setFixedSize(ch, ch)
+        self.lead_in.setFixedHeight(ch); self.say_in.setFixedHeight(ch)
+        self.layout().setSpacing(max(2, int(4 * z)))
         if self.del_btn is not None:
             dh = max(14, int(16 * z)); self.del_btn.setFixedSize(dh, dh); self._del_pad.setFixedSize(dh, dh)
             fd = QFont(); fd.setPixelSize(max(8, int(10 * z))); self.del_btn.setFont(fd)
@@ -557,8 +596,10 @@ class RingCard(QFrame):
         self.sec_input.setFont(fi)
         fk = QFont("Microsoft JhengHei"); fk.setPixelSize(max(9, int(11 * z)))
         self.key_btn.setFont(fk)
+        for wdg in (self.voice_chk, self.lead_in, self.say_in, self.sec_lbl):
+            wdg.setFont(fk)
         fb = QFont(); fb.setPixelSize(max(9, int(12 * z)))
-        self.loop_btn.setFont(fb); self.reset_btn.setFont(fb); self.force_btn.setFont(fb)
+        self.reset_btn.setFont(fb); self.force_btn.setFont(fb)
         _place_close_btn(self)
         self.updateGeometry(); self.update()
 
@@ -601,13 +642,42 @@ class RingCard(QFrame):
     def reset(self):
         self.active = False; self.remaining = 0.0; self._deadline = 0.0; self.update()
 
+    def _on_loop(self, on):
+        self.loop = on; self.update()
+
+    def set_edit(self, on):
+        """設定模式：卡片位置/大小不變，圓環與 ↺ 換成可設定的欄位"""
+        self.edit = on
+        self.edit_box.setVisible(on); self.sec_lbl.setVisible(on); self.reset_btn.setVisible(not on)
+        self.setCursor(Qt.ArrowCursor if on else Qt.PointingHandCursor)
+        self.setToolTip("" if on else "單擊：開始　·　快速雙擊：重新開始")
+        self.update()
+
+    def show_voice_fields(self):
+        """把目前的語音設定填進設定模式的欄位（不觸發存檔）"""
+        for wdg in (self.voice_chk, self.lead_in, self.say_in):
+            wdg.blockSignals(True)
+        self.voice_chk.setChecked(self.voice_on)
+        self.lead_in.setText(self.voice_lead_text); self.say_in.setText(self.voice_say)
+        for wdg in (self.voice_chk, self.lead_in, self.say_in):
+            wdg.blockSignals(False)
+
+    def voice_lead(self):
+        """這張卡的語音提前秒數：有個別設定用個別的（0＝結束時念），否則用全域"""
+        if self.voice_lead_text:
+            try:
+                return max(0.0, float(self.voice_lead_text))
+            except ValueError:
+                pass
+        return RingCard.VOICE_LEAD
+
     def _arm_voice(self, secs):
         # 卡片秒數本身不超過提前秒數就不念（剛按下就念沒有意義）
-        lead = RingCard.VOICE_LEAD
+        lead = self.voice_lead()
         self.said = lead > 0 and secs <= lead
 
     def voice_text(self):
-        return self.name_lbl.text().strip()
+        return self.voice_say or self.name_lbl.text().strip()
 
     def hotkey_activate(self):
         """全域按鍵觸發。⚡開：隨時重新倒數；⚡關（預設）：READY 時才開始倒數。
@@ -625,7 +695,7 @@ class RingCard(QFrame):
         """更新倒數；回傳 True 代表這一刻該念出卡片名稱（語音提示）"""
         if not self.active:
             return False
-        lead = RingCard.VOICE_LEAD
+        lead = self.voice_lead()
         announce = False
         self.remaining = max(0.0, self._deadline - time.perf_counter())
         if lead > 0 and not self.said and self.remaining <= lead:
@@ -655,7 +725,7 @@ class RingCard(QFrame):
         if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
                                                     self.key_btn, self.force_btn,
                                                     self.name_lbl if self.editable else None, self.del_btn,
-                                                    self.close_btn):
+                                                    self.close_btn) or self.edit:
             return
         if e.button() == Qt.LeftButton:
             self.trigger()
@@ -664,7 +734,7 @@ class RingCard(QFrame):
         if self.childAt(e.position().toPoint()) in (self.sec_input, self.loop_btn, self.reset_btn,
                                                     self.key_btn, self.force_btn,
                                                     self.name_lbl if self.editable else None, self.del_btn,
-                                                    self.close_btn):
+                                                    self.close_btn) or self.edit:
             return
         if e.button() == Qt.LeftButton:
             self.restart()
@@ -677,8 +747,12 @@ class RingCard(QFrame):
             base = QColor(*(min(c + 14, 255) for c in CARD_RGB), a)
         path = QPainterPath(); path.addRoundedRect(QRectF(r), 14, 14)
         p.fillPath(path, QBrush(base))
-        border = QColor(46, 230, 166, 220) if self.loop else QColor(255, 255, 255, int(0.12 * a))
-        p.setPen(QPen(border, 2 if self.loop else 1)); p.drawPath(path)
+        if self.loop:                                   # 巡迴中：亮黃色粗框
+            p.setPen(QPen(C_LOOP, 3)); p.drawPath(path)
+        else:
+            p.setPen(QPen(QColor(255, 255, 255, int(0.12 * a)), 1)); p.drawPath(path)
+        if self.edit:                                   # 設定模式不畫圓環
+            p.end(); return
 
         top = self.name_lbl.geometry().bottom() + 4
         bot = self.sec_input.geometry().top() - 4
@@ -715,7 +789,7 @@ class CounterCard(QFrame):
     def __init__(self, name, count):
         super().__init__()
         self.default_max = int(count)
-        self.count = 0; self.closed = False
+        self.count = 0; self.closed = False; self.edit = False
         self._hover = False; self.block_alpha = 240; self.zoom = 1.0
         self.hotkey_id = None; self.hotkey_vk = None; self._last_hotkey = 0.0
 
@@ -725,6 +799,8 @@ class CounterCard(QFrame):
         self.close_btn = _make_close_btn(self)
         lay.addStretch(1)
         row = QHBoxLayout(); row.setSpacing(4)
+        self.max_lbl = QLabel("次數"); self.max_lbl.setObjectName("cardLbl"); self.max_lbl.setVisible(False)
+        row.addWidget(self.max_lbl, 0)
         self.max_input = QLineEdit(); self.max_input.setPlaceholderText(str(int(count)))
         self.max_input.setAlignment(Qt.AlignCenter); self.max_input.setObjectName("secInput")
         self.max_input.setToolTip("客製次數：留空用預設")
@@ -758,6 +834,7 @@ class CounterCard(QFrame):
         fk = QFont("Microsoft JhengHei"); fk.setPixelSize(max(9, int(11 * z)))
         self.key_btn.setFont(fk)
         fb = QFont(); fb.setPixelSize(max(9, int(12 * z))); self.reset_btn.setFont(fb)
+        self.max_lbl.setFont(fk)
         _place_close_btn(self)
         self.updateGeometry(); self.update()
 
@@ -775,6 +852,12 @@ class CounterCard(QFrame):
             return int(t) if t else self.default_max
         except ValueError:
             return self.default_max
+
+    def set_edit(self, on):
+        self.edit = on
+        self.max_lbl.setVisible(on); self.reset_btn.setVisible(not on)
+        self.setCursor(Qt.ArrowCursor if on else Qt.PointingHandCursor)
+        self.update()
 
     def increment(self):
         mx = self._resolve_max()
@@ -802,14 +885,14 @@ class CounterCard(QFrame):
     def leaveEvent(self, e): self._hover = False; self.update()
 
     def mousePressEvent(self, e):
-        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn, self.close_btn):
+        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn, self.close_btn) or self.edit:
             return
         if e.button() == Qt.LeftButton:
             self.increment()
 
     def mouseDoubleClickEvent(self, e):
         # 快速連點時第二下由 doubleClick 送達，這裡補計一次，確保每次點擊都算到
-        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn, self.close_btn):
+        if self.childAt(e.position().toPoint()) in (self.max_input, self.reset_btn, self.key_btn, self.close_btn) or self.edit:
             return
         if e.button() == Qt.LeftButton:
             self.increment()
@@ -826,6 +909,13 @@ class CounterCard(QFrame):
         done = mx > 0 and self.count >= mx
         border = QColor(46, 230, 166, 220) if done else QColor(255, 255, 255, int(0.12 * a))
         p.setPen(QPen(border, 2 if done else 1)); p.drawPath(path)
+        if self.edit:                                   # 設定模式：不畫圓環，只標示這是計次卡
+            p.setPen(QColor(150, 156, 170))
+            f = QFont("Microsoft JhengHei"); f.setPixelSize(max(9, int(11 * self.zoom))); p.setFont(f)
+            mid = QRectF(0, self.name_lbl.geometry().bottom(), self.width(),
+                         self.max_input.geometry().top() - self.name_lbl.geometry().bottom())
+            p.drawText(mid, Qt.AlignCenter, "計次卡\n（不念語音）")
+            p.end(); return
 
         top = self.name_lbl.geometry().bottom() + 4
         bot = self.max_input.geometry().top() - 4
@@ -1757,6 +1847,51 @@ class CalcPage(QWidget):
 # =========================================================================
 #  主視窗
 # =========================================================================
+# =========================================================================
+#  F. 語速倍數（設定模式的語音設定列使用）
+# =========================================================================
+def rate_to_mult(r):
+    """SAPI 語速（-10~10）→ 倍速：每 10 段 ×3（實測 4 段 ≈ 1.55 倍）"""
+    return 3 ** (r / 10)
+
+
+def mult_to_rate(m):
+    return max(-10, min(10, round(10 * math.log(max(0.1, m)) / math.log(3))))
+
+
+class RateSpin(QDoubleSpinBox):
+    """語速倍數輸入框。Windows 語速只有 21 段，輸入的倍數會對到最接近的一段；上下鍵一次跳一段。"""
+
+    def __init__(self, slider, on_commit):
+        super().__init__()
+        self.slider, self.on_commit = slider, on_commit
+        self.setObjectName("rateSpin")
+        self.setDecimals(2); self.setSuffix(" 倍")
+        self.setRange(round(rate_to_mult(slider.minimum()), 2), round(rate_to_mult(slider.maximum()), 2))
+        self.setFixedWidth(76); self.setAlignment(Qt.AlignCenter)
+        self.setButtonSymbols(QDoubleSpinBox.NoButtons)       # 滑鼠滾輪/上下鍵一次跳一段
+        self.setToolTip("語速倍數，可直接輸入（例：1.5）。\nWindows 語速只有固定段數，會自動對到最接近的一段。")
+        self.sync()
+        self.editingFinished.connect(self._typed)
+
+    def sync(self):
+        self.blockSignals(True)
+        self.setValue(round(rate_to_mult(self.slider.value()), 2))
+        self.blockSignals(False)
+
+    def _typed(self):
+        r = mult_to_rate(self.value())
+        changed = r != self.slider.value()
+        self.slider.setValue(r)
+        self.sync()
+        if changed:
+            self.on_commit()
+
+    def stepBy(self, steps):
+        self.slider.setValue(self.slider.value() + steps)
+        self.on_commit()
+
+
 class SnapSizeGrip(QSizeGrip):
     """右下角縮放握把。不用 Qt 內建的拖曳（Windows 上會交給系統處理、拿不到拖曳過程），
     自己算新尺寸交給主視窗，主視窗才能做「接近卡片底部就吸住」的磁吸。"""
@@ -1816,6 +1951,10 @@ class TimerWindow(QWidget):
         self.voice_cfg = vc if isinstance(vc, dict) else {}
         RingCard.VOICE_LEAD = self._voice_lead_secs(self.voice_cfg.get("lead", ""))
         self.voice = VoiceEngine()
+        cs = self.cfg.get("card_secs")
+        self.card_secs = {k: v for k, v in cs.items() if isinstance(v, str)} if isinstance(cs, dict) else {}
+        cv = self.cfg.get("card_voice")
+        self.card_voice = {k: v for k, v in cv.items() if isinstance(v, dict)} if isinstance(cv, dict) else {}
         self.card_by_id = {}          # hotkey_id → 卡片
         self.cat_cards = []           # 每個 Boss 分類各自的卡片清單
         self.cat_flows = []           # 每個 Boss 分類頁的流式排版（角色卡會插進目前這頁）
@@ -1845,10 +1984,12 @@ class TimerWindow(QWidget):
 
         outer.addLayout(self._titlebar())
         outer.addWidget(self._boss_bar())
-        outer.addWidget(self._ruler_settings())
+        # 設定列：只在 ⚙ 設定模式顯示（語音 / 血量刻度 / 視窗調整）
         outer.addWidget(self._voice_settings())
+        outer.addWidget(self._ruler_settings())
         self.win_set = WinAdjustPanel(self); self.win_set.setVisible(False)
         outer.addWidget(self.win_set)
+        self.edit_mode = False
 
         self.main_stack = QStackedWidget(); outer.addWidget(self.main_stack, 1)
         exp_scroll = QScrollArea(); exp_scroll.setWidgetResizable(True); exp_scroll.setObjectName("scroll")
@@ -1864,7 +2005,8 @@ class TimerWindow(QWidget):
         bv.addWidget(self.boss_stack, 1)
         self.main_stack.addWidget(boss_page)                   # 1 = 打Boss
         self.boss_combo.currentIndexChanged.connect(self.boss_stack.setCurrentIndex)
-        self.boss_stack.currentChanged.connect(lambda _i: self._mount_player_cards())
+        self.boss_stack.currentChanged.connect(self._on_boss_changed)
+        self._cur_cat = self.boss_stack.currentIndex()
         self._mount_player_cards()
 
         outer.addWidget(self._bottombar())
@@ -1892,6 +2034,7 @@ class TimerWindow(QWidget):
         self.size_grip = SnapSizeGrip(self.frame, self); self.size_grip.setFixedSize(16, 16)
         self.size_grip.raise_(); self._place_grip()
         self._schedule_refit()
+        self.frame.installEventFilter(self)  # 設定列等版面變動 → 也重新貼齊
 
     def _titlebar(self):
         bar = QHBoxLayout(); bar.setSpacing(6)
@@ -1907,12 +2050,13 @@ class TimerWindow(QWidget):
         self.boss_btn.clicked.connect(lambda: self.set_mode("boss"))
         self.mode_group.addButton(self.exp_btn); self.mode_group.addButton(self.boss_btn)
         bar.addWidget(self.boss_btn); bar.addWidget(self.exp_btn)
-        self.win_btn = QPushButton("🖥 視窗調整"); self.win_btn.setObjectName("toolTab")
-        self.win_btn.setCheckable(True); self.win_btn.setCursor(Qt.PointingHandCursor)
-        self.win_btn.setToolTip("調整遊戲視窗大小與位置（例：21:9 看到更寬的地圖）")
-        self.win_btn.toggled.connect(self._toggle_win_adjust)
-        bar.addWidget(self.win_btn)
         bar.addStretch(1)
+        self.set_btn = QPushButton("⚙"); self.set_btn.setObjectName("toolBtn")
+        self.set_btn.setCheckable(True); self.set_btn.setCursor(Qt.PointingHandCursor)
+        self.set_btn.setToolTip("設定模式：卡片切換成設定欄位（秒數、按鍵、語音），\n"
+                                "並顯示語音 / 血量刻度 / 視窗調整設定列。再按一次結束設定。")
+        self.set_btn.toggled.connect(self._toggle_edit)
+        bar.addWidget(self.set_btn)
         self.pin_btn = QPushButton("📌"); self.pin_btn.setObjectName("toolBtn")
         self.pin_btn.setCheckable(True); self.pin_btn.setChecked(True)
         self.pin_btn.setToolTip("永遠置頂"); self.pin_btn.setCursor(Qt.PointingHandCursor)
@@ -2025,14 +2169,15 @@ class TimerWindow(QWidget):
 
         rw = QWidget(); rl = QHBoxLayout(rw); rl.setContentsMargins(0, 0, 0, 0); rl.setSpacing(6)
         rl.addWidget(self._mini("語速"))
-        self.voice_rate = QSlider(Qt.Horizontal); self.voice_rate.setRange(-2, 10)
+        self.voice_rate = QSlider(Qt.Horizontal); self.voice_rate.setRange(-5, 10)
         rate = self.voice_cfg.get("rate", VOICE_RATE_DEFAULT)
         self.voice_rate.setValue(rate if isinstance(rate, int) else VOICE_RATE_DEFAULT)
-        self.voice_rate.setFixedWidth(80)
+        self.voice_rate.setFixedWidth(110)
         self.voice_rate.setToolTip("語速（預設約 1.5 倍速）")
+        self.voice_rate_in = RateSpin(self.voice_rate, lambda: self._voice_test())
         self.voice_rate.valueChanged.connect(self._on_voice_rate)
         self.voice_rate.sliderReleased.connect(lambda: self._voice_test())
-        rl.addWidget(self.voice_rate)
+        rl.addWidget(self.voice_rate); rl.addWidget(self.voice_rate_in)
         self.voice_test_btn = QPushButton("試聽"); self.voice_test_btn.setObjectName("toolPill")
         self.voice_test_btn.setCursor(Qt.PointingHandCursor)
         self.voice_test_btn.clicked.connect(lambda: self._voice_test())
@@ -2124,8 +2269,25 @@ class TimerWindow(QWidget):
         self.hotkeys.pop(card.hotkey_id, None)
         if card._custom in self.custom_defs:
             self.custom_defs.remove(card._custom)
+        self.card_voice.pop(card.hotkey_id, None)
+        self.cfg["card_voice"] = self.card_voice
         card.hide(); card.deleteLater()
         self._rebuild_vk_map(); self._save_config()
+
+    def _on_boss_changed(self, idx):
+        """切換 Boss：前一頁的 Boss 卡全部重置（停止倒數/計次歸零），並取消排隊中的語音。
+        角色卡、自訂卡跨分類共用，不重置。"""
+        prev = getattr(self, "_cur_cat", -1)
+        if prev != idx and 0 <= prev < len(self.cat_cards):
+            stopped = False
+            for c in self.cat_cards[prev]:
+                if getattr(c, "active", False) or getattr(c, "count", 0):
+                    stopped = True
+                c.reset()
+            if stopped:
+                self.voice.stop()
+        self._cur_cat = idx
+        self._mount_player_cards()
 
     def _mount_player_cards(self):
         """把角色卡插進「目前分類頁」卡片流的最前面：不再自成一列，會跟 BOSS 卡一起排、一起折行"""
@@ -2223,7 +2385,8 @@ class TimerWindow(QWidget):
         self.exp_btn.setChecked(not is_boss); self.boss_btn.setChecked(is_boss)
         for w in self._boss_only_bottom:
             w.setVisible(is_boss)
-        self._sync_panels()
+        if not is_boss and getattr(self, "edit_mode", False):
+            self.set_btn.setChecked(False)              # 離開打Boss 頁就結束設定模式
         if is_boss:
             if prev not in (None, "boss") and self._boss_h and not self._snapped:
                 self.setMinimumHeight(0)                    # 先解除練功頁的 450，再恢復原本的高度
@@ -2232,32 +2395,35 @@ class TimerWindow(QWidget):
         else:
             self.setMinimumHeight(self.base_min_h)          # 練功頁要完整顯示
 
-    def _sync_panels(self):
-        is_boss = getattr(self, "mode", "exp") == "boss"
-        self._set_panel_visible(self.ruler_set, is_boss and self.ruler_btn.isChecked())
-        self._set_panel_visible(self.voice_set, is_boss and self.voice_btn.isChecked())
-        self._set_panel_visible(self.win_set, self.win_btn.isChecked())
-
-    def _toggle_win_adjust(self, on):
+    # ---------- 設定模式（⚙） ----------
+    def _toggle_edit(self, on):
+        """卡片原地切換成設定欄位，並展開設定列；再按一次 ⚙ 結束（設定隨改隨存）"""
+        if on and getattr(self, "mode", None) != "boss":
+            self.set_mode("boss")
+        self.edit_mode = on
         if on:
-            self.win_set.ensure_filled()      # 第一次打開：寬度自動填最寬、高度依比例
-        self._sync_panels()
+            self.win_set.ensure_filled()          # 視窗調整：寬度自動填最寬、高度依比例
+        for c in self.cards:
+            if isinstance(c, RingCard):
+                c.show_voice_fields()
+            c.set_edit(on)
+        for panel in (self.voice_set, self.ruler_set, self.win_set):
+            self._set_panel_visible(panel, on)
+        if not on:
+            self.setFocus()                       # 讓正在打字的欄位結束編輯
+            self._save_config()
+        self._schedule_refit()
 
     def _set_panel_visible(self, panel, show):
-        # 顯示/隱藏設定列時，讓視窗高度隨之增減，避免壓縮到卡片區
+        # 顯示/隱藏設定列：未吸附時視窗高度跟著增減，避免壓縮到卡片區（吸附時由 _refit 貼齊）
         if show == panel.isVisible():
             return
-        delta = self._panel_height(panel)
-        if show:
-            panel.setVisible(True)
-            self.resize(self.width(), self.height() + delta)
-        else:
-            panel.setVisible(False)
-            self.resize(self.width(), max(self.minimumHeight(), self.height() - delta))
-
-    def _panel_height(self, panel):
-        cw = max(60, self.width() - 28)      # 扣掉外層左右邊界
-        return panel.layout().heightForWidth(cw) + 8   # +外層 spacing
+        cw = max(60, self.width() - 28)
+        delta = panel.layout().heightForWidth(cw) + 8
+        panel.setVisible(show)
+        if not self._snapped:
+            h = self.height() + (delta if show else -delta)
+            self.resize(self.width(), max(self.minimumHeight(), h))
 
     # ---------- 按鍵偵測 ----------
     def _wire_card(self, card):
@@ -2267,6 +2433,18 @@ class TimerWindow(QWidget):
         card.key_btn.customContextMenuRequested.connect(lambda _pos, c=card: self._clear_hotkey(c))
         if getattr(card, "force_btn", None) is not None:
             card.force_btn.toggled.connect(lambda on, c=card: self._on_force_toggled(c, on))
+        if card.hotkey_id in self.card_voice:
+            self._apply_card_voice(card, self.card_voice[card.hotkey_id])
+        if isinstance(card, RingCard):
+            card.voice_chk.toggled.connect(lambda v, c=card: self.set_card_voice(c, "on", bool(v)))
+            card.lead_in.textChanged.connect(lambda t, c=card: self.set_card_voice(c, "lead", t.strip()))
+            card.say_in.textChanged.connect(lambda t, c=card: self.set_card_voice(c, "text", t.strip()))
+        if not getattr(card, "editable", False):    # 內建卡的客製秒數/次數也存檔（自訂卡另外存）
+            box = card.sec_input if isinstance(card, RingCard) else card.max_input
+            saved = self.card_secs.get(card.hotkey_id)
+            if isinstance(saved, str):
+                box.setText(saved)
+            box.textChanged.connect(lambda t, c=card: self._on_card_secs(c, t))
         if getattr(card, "close_btn", None) is not None:
             card.close_btn.clicked.connect(lambda _=False, c=card: self._close_card(c))
             if card.hotkey_id in self.hidden_ids:
@@ -2368,8 +2546,6 @@ class TimerWindow(QWidget):
         if e.oldSize().width() != e.size().width():
             self._schedule_refit()           # 寬度變了 → 卡片折行數可能變了
         # 視窗窄時按鈕只留圖示，避免擠壓到模式頁籤 / Boss 下拉選單
-        if hasattr(self, "win_btn"):
-            self._compact_btn(self.win_btn, "🖥 視窗調整", "🖥", self.width() >= 430)
         if hasattr(self, "voice_btn"):
             wide = self.width() >= 600
             for b, full, icon in ((self.player_btn, "⚔ 角色", "⚔"), (self.add_custom_btn, "＋自訂", "＋"),
@@ -2405,6 +2581,7 @@ class TimerWindow(QWidget):
         self._refit_pending = False
         if getattr(self, "mode", None) != "boss" or not self.isVisible():
             return
+        self.layout().activate(); self.frame.layout().activate()   # 先讓版面算完，量到的才是最新高度
         hs = self._fit_heights()
         if hs is None:
             return
@@ -2412,6 +2589,7 @@ class TimerWindow(QWidget):
         self.setMinimumHeight(low)
         if self._snapped and self.height() != fit:
             self.resize(self.width(), fit)
+            self._schedule_refit()           # 設定列剛出現/消失時版面還在調整，下一輪再確認一次
 
     def resize_from_grip(self, w, h):
         """縮放握把拖曳中：照滑鼠改尺寸；打Boss 頁時接近卡片底部就吸住"""
@@ -2452,19 +2630,16 @@ class TimerWindow(QWidget):
             else:
                 self.ruler_window.ruler.set_base_alpha(self._ralpha())
                 self.ruler_window.ruler.hi_color = QColor(self.ruler_hi_color)
-            self._sync_panels()   # 先讓設定列出現、主視窗長高
             saved = self._saved_ruler_geometry()
             if saved is not None:                         # 上次拉好的位置/寬度
                 self.ruler_window.setGeometry(saved)
             else:
-                # 再放到「長高後」主視窗的下方，避免遮到透明度那一排
                 self.ruler_window.move(self.x(), self.y() + self.height() + 16)
             self.ruler_window.show(); self.ruler_window.raise_()
             keep_logical_size(self.ruler_window)
         else:
             if self.ruler_window is not None:
                 self.ruler_window.hide()
-            self._sync_panels()
 
     def _saved_ruler_geometry(self):
         g = self.cfg.get("ruler_geometry")
@@ -2539,8 +2714,9 @@ class TimerWindow(QWidget):
         dt = TICK_MS / 1000.0
         say = [c for c in self.cards if c.tick(dt)]
         if say and self.voice_btn.isChecked():
-            for c in say:                       # 只念卡片名稱；依序排隊念，不會疊在一起
-                self.voice.say(c.voice_text())
+            for c in say:                       # 依序排隊念，不會疊在一起
+                if getattr(c, "voice_on", True):
+                    self.voice.say(c.voice_text())
 
     # ---------- 語音提示 ----------
     @staticmethod
@@ -2565,7 +2741,6 @@ class TimerWindow(QWidget):
             self.voice_btn.setToolTip(f"剩 {lead:g} 秒時念出技能名稱" if lead > 0 else "倒數結束時念出技能名稱")
         else:
             self.voice.stop()
-        self._sync_panels()
         self._save_voice()
 
     def _voice_test(self):
@@ -2582,7 +2757,32 @@ class TimerWindow(QWidget):
         self._save_voice(); self._voice_test()
 
     def _on_voice_rate(self, v):
+        self.voice_rate_in.sync()
         self.voice_cfg["rate"] = int(v); self._save_voice()
+
+    def set_card_voice(self, card, key, value):
+        """設定模式卡片上的 語音/提前/念的內容，存在設定檔 card_voice"""
+        ent = self.card_voice.setdefault(card.hotkey_id, {})
+        ent[key] = value
+        self._apply_card_voice(card, ent)
+        if ent.get("on", True) and not ent.get("lead") and not ent.get("text"):
+            self.card_voice.pop(card.hotkey_id, None)       # 全部是預設值就不必存
+        self.cfg["card_voice"] = self.card_voice; self._save_config()
+
+    def _on_card_secs(self, card, t):
+        t = t.strip()
+        if t:
+            self.card_secs[card.hotkey_id] = t
+        else:
+            self.card_secs.pop(card.hotkey_id, None)
+        self.cfg["card_secs"] = self.card_secs; self._save_config()
+
+    @staticmethod
+    def _apply_card_voice(card, ent):
+        if isinstance(card, RingCard):
+            card.voice_on = bool(ent.get("on", True))
+            card.voice_lead_text = str(ent.get("lead", "") or "")
+            card.voice_say = str(ent.get("text", "") or "")
 
     def _save_voice(self):
         self.cfg["voice"] = self.voice_cfg; self._save_config()
@@ -2667,9 +2867,14 @@ class TimerWindow(QWidget):
         #toolBtn:hover {{ background:{ctrl_h}; }}
         #toolBtn:checked {{ background:{ACCENT}; color:#0c1a14; }}
         #closeBtn:hover {{ background:#ff5757; color:white; }}
-        #loopBtn, #resetBtn {{ background:{ctrl}; color:#dfe3ea; border:none; border-radius:6px; padding:0; }}
-        #loopBtn:hover, #resetBtn:hover {{ background:{ctrl_h}; }}
-        #loopBtn:checked {{ background:{ACCENT}; color:#0c1a14; }}
+        #resetBtn {{ background:{ctrl}; color:#dfe3ea; border:none; border-radius:6px; padding:0; }}
+        #resetBtn:hover {{ background:{ctrl_h}; }}
+        #cardLoop {{ background:transparent; border:none; border-radius:4px; padding:0; }}
+        #cardLoop:hover {{ background:{ctrl_h}; }}
+        #cardChk {{ color:#dfe3ea; spacing:3px; }}
+        #cardLbl {{ color:#969caa; background:transparent; }}
+        #rateSpin {{ background:rgba(0,0,0,90); color:#eef0f5; border:1px solid {border};
+                border-radius:6px; padding:1px 4px; }}
 
         #tab, #toolTab {{ background:{ctrl}; color:#b9bfcc; border:none; border-radius:13px;
                 padding:6px 13px; font-size:12px; font-family:"Microsoft JhengHei"; font-weight:bold; }}
